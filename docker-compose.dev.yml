@@ -17,7 +17,7 @@ services:
 
     command: pnpm run start:dev
     ports:
-      - "${PORT:-5000}:3000"
+      - "${PORT:-5000}:5000"
 
   postgres:
     container_name: ${POSTGRES_CONTAINER_NAME:-postgres_dev}
