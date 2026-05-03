@@ -1,7 +1,7 @@
 services:
 
   migrator:
-    env_file: .env.stg
+    env_file: .env
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
 
@@ -10,7 +10,7 @@ services:
       target: production
     container_name: ${APP_CONTAINER_NAME:-app_stg}
     restart: always
-    env_file: .env.stg
+    env_file: .env
     environment:
       NODE_ENV: staging
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
