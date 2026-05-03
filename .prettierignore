@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Prisma generated files
+prisma/migrations/
+
+# Lock files
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Uploads
+uploads/
+
+# Docker
+docker/
+
+# Docs
+docs/
+
+# Coverage
+coverage/
+
+# Env files
+.env
+.env.*

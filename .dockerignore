@@ -1,0 +1,49 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build output
+dist
+build
+
+# Env files — never bake secrets into images
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+
+# Test artifacts
+coverage
+.jest-cache
+test
+
+# Dev tools
+.vscode
+.idea
+*.suo
+*.ntvs*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Uploads (runtime volume)
+uploads
+
+# Documentation
+docs
+*.md
+!README.md
+
+# Prisma generated client (regenerated during build)
+node_modules/.prisma
+
+# TypeScript incremental cache
+*.tsbuildinfo

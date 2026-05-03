@@ -1,0 +1,34 @@
+// ─── User Model ───────────────────────────────────────────────────────────────
+// Prisma field names use camelCase (TypeScript convention).
+// Database column names use snake_case (PostgreSQL convention) via @map.
+
+model User {
+  id                  String     @id @default(uuid())
+  email               String     @unique
+  password            String
+  firstName           String     @map("first_name")
+  lastName            String     @map("last_name")
+  phone               String?
+  avatar              String?
+  role                Role       @default(USER)
+  status              UserStatus @default(PENDING_VERIFICATION)
+  emailVerified       Boolean    @default(false) @map("email_verified")
+  emailVerifiedAt     DateTime?                  @map("email_verified_at")
+  lastLoginAt         DateTime?                  @map("last_login_at")
+  refreshToken        String?                    @map("refresh_token")
+  passwordResetToken  String?                    @map("password_reset_token")
+  passwordResetExpiry DateTime?                  @map("password_reset_expiry")
+
+  uploads   Upload[]
+  auditLogs AuditLog[]
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt      @map("updated_at")
+  deletedAt DateTime?                 @map("deleted_at")
+
+  @@index([email])
+  @@index([status])
+  @@index([role])
+  @@index([deletedAt], map: "idx_users_deleted_at")
+  @@map("users")
+}

@@ -1,0 +1,24 @@
+// ─── AuditLog Model ───────────────────────────────────────────────────────────
+// Immutable record of security-sensitive and state-changing events.
+// Written by AuditLogService (future); read by admin dashboards and compliance tools.
+// Never updated or soft-deleted — append-only by design.
+
+model AuditLog {
+  id         String  @id @default(uuid())
+  userId     String  @map("user_id")
+  action     String                      // e.g. USER_LOGIN, FILE_UPLOADED, ROLE_CHANGED
+  resource   String?                     // entity type acted on, e.g. User, Upload
+  resourceId String? @map("resource_id") // PK of the affected entity
+  metadata   Json?                       // arbitrary context (diff, request params, etc.)
+  ipAddress  String? @map("ip_address")
+  userAgent  String? @map("user_agent")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

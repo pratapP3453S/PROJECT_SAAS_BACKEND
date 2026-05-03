@@ -1,0 +1,31 @@
+ /*─── IdempotencyRecord Model ───────────────────────────────────────────────────
+ Stores processed POST request fingerprints to enable idempotent replay.
+
+ Two distinct use-cases share this table:
+  1. Client-keyed  — client provides `Idempotency-Key` header (24h TTL).
+     Same key + same body → original response replayed.
+     Same key + different body → 422 IDEMPOTENCY_KEY_MISMATCH.
+  2. Hash-only     — no key provided; server protects against rapid double-submits
+     by matching request hash within a short window (30s TTL).
+     Duplicate detected → 409 DUPLICATE_REQUEST.
+
+ Records are append-only. Expired records are left in place and ignored by
+ queries (expiresAt filter); background cleanup can purge them periodically.
+*/
+
+model IdempotencyRecord {
+  id             String    @id @default(uuid())
+
+  idempotencyKey String?   @unique @map("idempotency_key") 
+  requestHash    String    @map("request_hash")           
+
+  statusCode     Int       @map("status_code")           
+  responseBody   Json      @map("response_body")          
+
+  expiresAt      DateTime  @map("expires_at")              
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([requestHash, createdAt])
+  @@index([expiresAt])             
+  @@map("idempotency_records")
+}

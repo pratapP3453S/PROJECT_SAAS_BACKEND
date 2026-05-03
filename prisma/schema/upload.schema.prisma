@@ -1,0 +1,29 @@
+// ─── Upload Model ─────────────────────────────────────────────────────────────
+// Tracks every file processed by the upload pipeline.
+// Two-stage lifecycle: PENDING (temp URL) → PROCESSED (permanent URL).
+// Sensitive types (aadhar, identity, passport) are AES-256 encrypted on disk.
+
+model Upload {
+  id               String       @id @default(uuid())
+  userId           String       @map("user_id")
+  type             String                            // e.g. avatar, document, aadhar
+  status           UploadStatus @default(PENDING)
+  tempUrl          String?      @map("temp_url")     // set on upload; cleared after commit
+  permanentUrl     String?      @map("permanent_url") // set after commit
+  serverFileName   String       @map("server_filename") // UUID-based filename on disk
+  originalFileName String       @map("original_filename") // original client filename
+  mimeType         String       @map("mime_type")    // always image/webp after conversion
+  size             Int                               // byte size of stored file
+  isEncrypted      Boolean      @default(false)      @map("is_encrypted")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt      @map("updated_at")
+  deletedAt DateTime?                 @map("deleted_at")
+
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+  @@map("uploads")
+}
