@@ -90,7 +90,7 @@ const envFilePath = process.env.ENV_FILE
     // ─── Feature Modules ─────────────────────────────────────────────────
     AuthModule,
     UserModule,
-    UploadModule,
+    UploadModule.forRoot(),
     HealthModule,
   ],
 

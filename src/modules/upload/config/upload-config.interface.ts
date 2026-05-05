@@ -1,104 +1,122 @@
 /**
- * Upload Configuration Interface
+ * upload-config.interface — typed shape of all upload configuration.
  *
- * Defines the contract for upload configuration that drives behavior across
- * all storage providers. This allows environment-based configuration without
- * changing code.
+ * Goal: Configuration is INDEPENDENT of any concrete provider implementation.
+ * Adding a new backend means adding a new provider class and a new optional
+ * sub-block here — no edits to UploadService, UploadController, or any other
+ * provider class. (Open/Closed Principle.)
  *
- * Key principle: Configuration is INDEPENDENT of storage provider implementation.
- * The same config works whether using LocalStorage, S3, or Cloudflare R2.
+ * Provider sub-blocks are optional; the active provider's keys are validated
+ * inside UploadConfigService at startup so misconfiguration fails fast.
  */
 
-export interface UploadConfig {
-  // Storage backend selection
-  provider: 'local' | 's3' | 'cloudflare' | 'gcs' | 'azure';
+export type UploadProviderName =
+  | 'local'
+  | 's3'
+  | 'cloudflare'
+  | 'cloudinary'
+  | 'imagekit'
+  | 'gcs'
+  | 'azure';
 
-  // Local storage paths (used by LocalStorageProvider)
+export interface S3ProviderConfig {
+  region: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  endpoint?: string;
+  forcePathStyle?: boolean;
+  publicUrl?: string;
+  maxRetries?: number;
+  tempPrefix: string;
+  permanentPrefix: string;
+}
+
+export interface CloudflareR2ProviderConfig {
+  accountId: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  bucketName: string;
+  endpoint?: string;
+  publicUrl?: string;
+  tempPrefix: string;
+  permanentPrefix: string;
+}
+
+export interface CloudinaryProviderConfig {
+  cloudinaryUrl?: string;
+  cloudName: string;
+  apiKey: string;
+  apiSecret: string;
+  folder: string;
+  uploadPreset?: string;
+  useSigned: boolean;
+  secure: boolean;
+}
+
+export interface ImageKitProviderConfig {
+  publicKey: string;
+  privateKey: string;
+  urlEndpoint: string;
+  folder: string;
+  useUniqueFileName: boolean;
+}
+
+export interface GcsProviderConfig {
+  projectId: string;
+  keyFilename?: string;
+  bucket: string;
+}
+
+export interface AzureProviderConfig {
+  connectionString: string;
+  containerName: string;
+}
+
+export interface UploadConfig {
+  // ─── Core / cross-provider ───────────────────────────────────────────────
+  provider: UploadProviderName;
   localStoragePath: string;
   tempStoragePath: string;
+  publicBaseUrl?: string;
 
-  // AWS S3 configuration
-  s3?: {
-    region: string;
-    bucket: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-    endpoint?: string; // for S3-compatible services
-    maxRetries?: number;
-  };
-
-  // Cloudflare R2 configuration
-  cloudflare?: {
-    accountId: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-    bucketName: string;
-    publicUrl?: string; // CDN URL for file serving
-  };
-
-  // Google Cloud Storage configuration
-  gcs?: {
-    projectId: string;
-    keyFilename?: string;
-    bucket: string;
-  };
-
-  // Azure Blob Storage configuration
-  azure?: {
-    connectionString: string;
-    containerName: string;
-  };
-
-  // File size limits (in bytes)
   maxFileSize: number;
-
-  // Temp file retention (in hours)
   tempRetentionHours: number;
-
-  // Concurrency settings
   maxConcurrentUploads?: number;
   maxConcurrentDownloads?: number;
-
-  // Retry policy
   maxRetries?: number;
   retryDelayMs?: number;
 
-  // Presigned URL configuration
-  presignedUrlExpiry: number; // in seconds
+  presignedUrlExpiry: number;
   enablePresignedUrls: boolean;
 
-  // Encryption configuration
   enableEncryption: boolean;
   encryptionKeyProvider?: 'env' | 'kms' | 'vault';
 
-  // Audit configuration
   enableAuditLogging: boolean;
   auditLogDestination?: 'database' | 'file' | 'cloudwatch';
+
+  // ─── Provider-specific (only the active one is required) ─────────────────
+  s3?: S3ProviderConfig;
+  cloudflare?: CloudflareR2ProviderConfig;
+  cloudinary?: CloudinaryProviderConfig;
+  imagekit?: ImageKitProviderConfig;
+  gcs?: GcsProviderConfig;
+  azure?: AzureProviderConfig;
 }
 
 export interface FileTypeConfig {
-  // Supported MIME types for this upload type
   allowedMimeTypes: string[];
-
-  // File processing rules
   processing?: {
-    convertToFormat?: string; // e.g., 'webp', 'jpg'
+    convertToFormat?: string;
     maxWidth?: number;
     maxHeight?: number;
     quality?: number;
   };
-
-  // Whether to encrypt before storing
   encrypted: boolean;
-
-  // Storage tier/class (standard, infrequent, glacier)
   storageTier?: 'standard' | 'infrequent' | 'archive';
-
-  // Access control
   isPublic: boolean;
-  publicCacheTtl?: number; // in seconds
-
-  // Retention policy
+  publicCacheTtl?: number;
   retentionDays?: number;
 }
 
