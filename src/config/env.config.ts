@@ -166,6 +166,10 @@ class EnvironmentVariables {
   @IsOptional()
   UPLOAD_PUBLIC_BASE_URL: string = '';
 
+  @IsString()
+  @IsOptional()
+  UPLOAD_LOCAL_SIGNING_SECRET: string = '';
+
   // ─── Uploads — S3 ───────────────────────────────────────────────────────
   @IsString()
   @IsOptional()

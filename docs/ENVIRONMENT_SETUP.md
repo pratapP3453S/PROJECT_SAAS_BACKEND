@@ -456,7 +456,19 @@ UPLOAD_ENABLE_ENCRYPTION=true
 UPLOAD_ENABLE_AUDIT=true
 UPLOAD_AUDIT_DESTINATION=database    # database | file | cloudwatch
 UPLOAD_PUBLIC_BASE_URL=              # optional CDN/origin prefix
+UPLOAD_LOCAL_SIGNING_SECRET=         # HMAC secret for local presigned URLs
+                                     # (falls back to JWT_SECRET if empty;
+                                     #  set explicitly in production, ≥ 32 chars)
 ```
+
+> **Local presigned URLs.** When `UPLOAD_PROVIDER=local`, the API also exposes
+> `PUT /upload/local/direct` and `GET /upload/local/direct`. These are the local
+> equivalent of S3's signed URLs — anyone holding the URL can upload/download
+> the named key, but only until the signed expiry and only with the signed
+> content-type/max-size constraints. The HMAC secret used to sign these URLs is
+> `UPLOAD_LOCAL_SIGNING_SECRET`. In dev you can leave it blank to inherit
+> `JWT_SECRET`; in production, generate a dedicated 32+ char secret with
+> `openssl rand -base64 48`.
 
 ### AWS S3 (`UPLOAD_PROVIDER=s3`)
 ```env

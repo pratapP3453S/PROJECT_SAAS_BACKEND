@@ -57,6 +57,14 @@ export class UploadConfigService implements OnModuleInit {
       tempStoragePath: this.configService.get('UPLOAD_TEMP_PATH', './uploads/temp'),
       publicBaseUrl: this.configService.get('UPLOAD_PUBLIC_BASE_URL', '') || undefined,
 
+      // Local presigned-URL signing. Prefer the dedicated secret; fall back to
+      // JWT_SECRET so dev environments work without an extra var. Production
+      // should set UPLOAD_LOCAL_SIGNING_SECRET explicitly (≥ 32 chars).
+      localSigningSecret:
+        this.configService.get<string>('UPLOAD_LOCAL_SIGNING_SECRET') ||
+        this.configService.get<string>('JWT_SECRET') ||
+        '',
+
       maxFileSize: maxFileSizeMB * 1024 * 1024,
       tempRetentionHours: Number(this.configService.get('UPLOAD_TEMP_RETENTION_HOURS', 24)),
       maxConcurrentUploads: Number(this.configService.get('UPLOAD_MAX_CONCURRENT', 5)),
@@ -241,7 +249,12 @@ export class UploadConfigService implements OnModuleInit {
 
     switch (provider) {
       case 'local':
-        // Nothing to validate — handler creates the directory on first use.
+        // The presigned-URL flow requires an HMAC secret. We accept JWT_SECRET
+        // as a fallback (loadConfiguration() handles that), so this only fails
+        // when neither key is set.
+        if (!this.uploadConfig.localSigningSecret) {
+          missing.push('UPLOAD_LOCAL_SIGNING_SECRET (or JWT_SECRET as fallback)');
+        }
         break;
       case 's3': {
         const cfg = this.uploadConfig.s3;

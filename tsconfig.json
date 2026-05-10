@@ -27,5 +27,16 @@
       "@lib/*": ["./src/lib/*"],
       "@jobs/*": ["./src/jobs/*"]
     }
+  },
+  // tsc -w (used by `nest start --watch`) defaults to native FS events. Those
+  // do not traverse Docker bind mounts on Windows / WSL2, so saves on the host
+  // are invisible to the watcher inside the container. Force TypeScript to
+  // poll instead — slightly more CPU, but reliable across every OS / FS combo.
+  // Has no effect on plain `nest build` (one-shot), only on watch mode.
+  "watchOptions": {
+    "watchFile": "priorityPollingInterval",
+    "watchDirectory": "dynamicPriorityPolling",
+    "fallbackPolling": "dynamicPriority",
+    "synchronousWatchDirectory": true
   }
 }

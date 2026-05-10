@@ -95,10 +95,21 @@ export class CloudinaryStorageProvider
     };
   }
 
-  async commitToPermanent(filename: string, type: string): Promise<StoredFile> {
+  /**
+   * Promote a temp resource to {folder}/{type}/{public_id-base}.
+   *
+   * `tempIdentifier` may be a flat filename (server-mediated, no slashes — we
+   * synthesise the temp public_id) OR a full temp key (presigned, contains
+   * slashes — we use it verbatim minus the extension). Either way the
+   * destination public_id collapses to {folder}/{type}/{leaf}, matching the
+   * server-mediated commit shape exactly.
+   */
+  async commitToPermanent(tempIdentifier: string, type: string): Promise<StoredFile> {
     const safeType = this.safeSegment(type);
-    const safeFilename = this.extractFilename(filename);
-    const fromPublicId = `${this.tempFolder(safeType)}/${this.stripExt(safeFilename)}`;
+    const safeFilename = this.extractFilename(tempIdentifier);
+    const fromPublicId = tempIdentifier.includes('/')
+      ? this.stripExt(this.normalizePath(tempIdentifier))
+      : `${this.tempFolder(safeType)}/${this.stripExt(safeFilename)}`;
     const toPublicId = `${this.permanentFolder(safeType)}/${this.stripExt(safeFilename)}`;
 
     try {
@@ -266,6 +277,7 @@ export class CloudinaryStorageProvider
       size: head.size,
       contentType: head.mimeType,
       url: cloudinary.url(input.fileKey, { secure: this.cfg.secure }),
+      fileKey: input.fileKey,
     };
   }
 

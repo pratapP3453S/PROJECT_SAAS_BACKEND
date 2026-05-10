@@ -61,20 +61,54 @@ SHA-256( METHOD + ":" + PATH + ":" + stableJSON(body) )
 
 ## Response Format
 
+Every JSON response — success **and** error — ships with a diagnostic envelope
+of `request`, `timing`, `server`, and (when paginated) `meta`. Think of these
+as the API equivalent of the Axios response object: most callers only read
+`data` / `error`, but the other fields are always there for debugging,
+correlation, and observability.
+
+The same `requestId` is also returned as the `X-Request-Id` response header,
+so log aggregators can correlate without parsing the JSON body.
+
 ### Success Response
 
 ```json
 {
   "success": true,
-  "statusCode": 200,
-  "message": "Operation successful",
-  "data": { ... },
-  "timestamp": "2024-01-01T00:00:00.000Z",
-  "path": "/api/v1/..."
+  "statusCode": 201,
+  "message": "File uploaded successfully. Use POST /upload/commit ...",
+  "data": { "tempUrl": "/uploads/temp/abc.webp", "size": 45678, "isEncrypted": false },
+  "request": {
+    "requestId": "9b2c1f74-3b4a-4ed0-91f8-2a1c1c1c4a99",
+    "method": "POST",
+    "path": "/api/v1/upload/avatar",
+    "apiVersion": "v1",
+    "ip": "203.0.113.42",
+    "userAgent": "Mozilla/5.0 ..."
+  },
+  "timing": {
+    "totalMs": 187.42,
+    "dbMs": 12.7,    "dbQueries": 2,
+    "cacheMs": 1.4,  "cacheOps": 1, "cacheHits": 0, "cacheMisses": 1,
+    "externalMs": 0, "externalCalls": 0
+  },
+  "server": {
+    "hostname": "app-pod-7c4f",
+    "pid": 1234,
+    "env": "production",
+    "nodeVersion": "v22.18.0",
+    "appVersion": "1.0.0"
+  },
+  "timestamp": "2026-05-10T22:41:03.182Z",
+  "path": "/api/v1/upload/avatar"
 }
 ```
 
 ### Paginated Response
+
+`meta` carries pagination state (page, limit, total, …). The diagnostic
+fields (`request`, `timing`, `server`) are present on paginated responses too —
+omitted from the example below for brevity.
 
 ```json
 {
@@ -90,11 +124,19 @@ SHA-256( METHOD + ":" + PATH + ":" + stableJSON(body) )
     "hasNextPage": true,
     "hasPreviousPage": false
   },
-  "timestamp": "2024-01-01T00:00:00.000Z"
+  "request": { "requestId": "...", "method": "GET", "path": "/api/v1/users", "apiVersion": "v1" },
+  "timing":  { "totalMs": 42.1, "dbMs": 18.3, "dbQueries": 1, "cacheMs": 0.4, "cacheOps": 1, "cacheHits": 1, "cacheMisses": 0, "externalMs": 0, "externalCalls": 0 },
+  "server":  { "hostname": "app-pod-7c4f", "pid": 1234, "env": "production", "nodeVersion": "v22.18.0" },
+  "timestamp": "2026-05-10T22:41:03.182Z",
+  "path": "/api/v1/users"
 }
 ```
 
 ### Error Response
+
+Same diagnostic envelope as success — clients can read `request.requestId`,
+`timing.totalMs`, etc. uniformly regardless of `success`. `error.stack` is
+included only when `NODE_ENV !== 'production'`.
 
 ```json
 {
@@ -120,10 +162,71 @@ SHA-256( METHOD + ":" + PATH + ":" + stableJSON(body) )
       }
     ]
   },
-  "timestamp": "2024-01-01T00:00:00.000Z",
+  "request": {
+    "requestId": "9b2c1f74-3b4a-4ed0-91f8-2a1c1c1c4a99",
+    "method": "POST",
+    "path": "/api/v1/auth/register",
+    "apiVersion": "v1",
+    "ip": "203.0.113.42",
+    "userAgent": "Mozilla/5.0 ..."
+  },
+  "timing": {
+    "totalMs": 14.3,
+    "dbMs": 0,    "dbQueries": 0,
+    "cacheMs": 0, "cacheOps": 0, "cacheHits": 0, "cacheMisses": 0,
+    "externalMs": 0, "externalCalls": 0
+  },
+  "server": {
+    "hostname": "app-pod-7c4f",
+    "pid": 1234,
+    "env": "production",
+    "nodeVersion": "v22.18.0",
+    "appVersion": "1.0.0"
+  },
+  "timestamp": "2026-05-10T22:41:03.215Z",
   "path": "/api/v1/auth/register"
 }
 ```
+
+### Diagnostic Envelope Field Reference
+
+#### `request` — request identity (always present)
+| Field | Type | Notes |
+|---|---|---|
+| `requestId` | string (uuid) | Stable id; mirrored as `X-Request-Id` header. Inbound `X-Request-Id` is honoured (gateway tracing). |
+| `method` | string | HTTP method. |
+| `path` | string | Original URL with query string. |
+| `apiVersion` | string? | Extracted from `/api/vN/…`. Omitted for non-versioned routes. |
+| `ip` | string? | Caller IP (Express's resolved `req.ip`). |
+| `userAgent` | string? | Caller `User-Agent`. |
+| `userId` | string? | Authenticated user id, when set by `JwtAuthGuard`. |
+
+#### `timing` — end-to-end latency breakdown (always present, counts default to 0)
+| Field | Type | Notes |
+|---|---|---|
+| `totalMs` | number | Wall-clock ms from middleware entry to response render. |
+| `dbMs` | number | Sum of every Prisma query duration during the request. |
+| `dbQueries` | number | Count of Prisma queries fired. |
+| `cacheMs` | number | Sum of every CacheService op duration. |
+| `cacheOps` | number | Count of cache ops (get + set + del). |
+| `cacheHits` | number | Cache reads that returned a value. |
+| `cacheMisses` | number | Cache reads that returned null (or errored). |
+| `externalMs` | number | Aggregate external HTTP-call time (populated when an axios interceptor is wired). |
+| `externalCalls` | number | Count of external HTTP calls. |
+
+#### `server` — process identity (always present)
+| Field | Type | Notes |
+|---|---|---|
+| `hostname` | string | OS hostname (pod name in k8s). |
+| `pid` | number | Process id. |
+| `env` | string | `NODE_ENV`. |
+| `nodeVersion` | string | `process.version`. |
+| `region` | string? | `AWS_REGION` or `REGION` env. |
+| `appVersion` | string? | `APP_VERSION` env. |
+
+#### `tags` — free-form bag (optional)
+Anything pushed via `RequestContext.tag(key, value)` from any service during
+the request. Useful for ad-hoc diagnostics without changing the envelope shape.
 
 ---
 

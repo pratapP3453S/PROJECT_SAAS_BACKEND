@@ -27,19 +27,42 @@ export class RemoveFileDto {
 /**
  * CommitFileDto — POST body for POST /upload/commit.
  *
- * filename : server-assigned name returned by the upload endpoint (or
- *            /presigned-url's fileKey when using direct uploads — the leaf path
- *            component is enough; the active provider resolves it).
- * type     : target category. Determines the permanent prefix/folder.
+ * Two valid shapes, depending on which upload flow produced the temp file:
+ *
+ *  ┌─────────────────────────┬──────────────────────────────────────────┐
+ *  │ Server-mediated upload  │ { filename, type }                       │
+ *  │ (POST /upload/:type)    │ filename = leaf returned in tempUrl      │
+ *  ├─────────────────────────┼──────────────────────────────────────────┤
+ *  │ Presigned upload        │ { fileKey, type }                        │
+ *  │ (PUT /upload/local/...) │ fileKey  = full key from /presigned-url  │
+ *  │ (PUT s3 signed URL)     │            and /presigned-url/complete    │
+ *  └─────────────────────────┴──────────────────────────────────────────┘
+ *
+ * `fileKey` takes precedence when both are provided. The active provider
+ * detects which form it received (a key contains '/', a flat filename does not)
+ * and resolves the temp object accordingly.
  */
 export class CommitFileDto {
-  @ApiProperty({
-    description: 'Server filename returned by the upload endpoint',
+  @ApiPropertyOptional({
+    description:
+      'Leaf server filename returned by POST /upload/:type (server-mediated flow). ' +
+      'Required if `fileKey` is omitted.',
     example: 'f47ac10b-58cc-4372-a567-0e02b2c3d479.webp',
   })
   @IsString()
-  @IsNotEmpty()
-  filename: string;
+  @IsOptional()
+  filename?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Full temp key returned by POST /upload/presigned-url (presigned flow). ' +
+      'Required if `filename` is omitted. Example: ' +
+      '"uploads/temp/u-7/aadhar/abc.png".',
+    example: 'uploads/temp/u-7/aadhar/f47ac10b.png',
+  })
+  @IsString()
+  @IsOptional()
+  fileKey?: string;
 
   @ApiProperty({
     description: 'Target category for permanent storage',

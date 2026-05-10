@@ -14,10 +14,56 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
       REDIS_HOST: redis
       REDIS_PORT: ${REDIS_PORT:-6379}
+      # ─── Watcher polling (DEV ONLY) ─────────────────────────────────────
+      # Hot reload chain on Docker Desktop / Windows / WSL2:
+      #   host save → bind mount → mtime change in container → watcher fires
+      #
+      # Native FS events do NOT propagate reliably through Docker bind mounts
+      # on Windows. Every layer needs polling enabled:
+      #
+      #   • CHOKIDAR_USEPOLLING : any code that uses chokidar (sharp, multer, etc.)
+      #   • TSC watchOptions    : `nest start --watch` uses tsc-watch — set in
+      #                           tsconfig.json → "watchOptions"
+      #   • TS_NODE_FILES       : ts-node honours fs polling fallback
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "300"
+      TSC_WATCHFILE: "PriorityPollingInterval"
 
     command: pnpm run start:dev
     ports:
       - "${PORT:-5000}:5000"
+
+    # ─── Bind mounts for hot reload (DEV ONLY) ────────────────────────────
+    # Without these, the container only sees the source code that was COPYed
+    # into the image at build time — host edits never reach `nest --watch`
+    # and every code change requires a full image rebuild.
+    #
+    # The `/app/node_modules` anonymous volume is intentional: it MASKS any
+    # node_modules from the bind mounts and preserves the container's Linux-
+    # built install (sharp's linux binary, prisma's linux engine, etc.).
+    # It MUST be listed AFTER the source bind mounts so the mask wins.
+    volumes:
+      - ./src:/app/src
+      - ./prisma:/app/prisma
+      - ./test:/app/test
+      - ./tsconfig.json:/app/tsconfig.json
+      - ./tsconfig.build.json:/app/tsconfig.build.json
+      - ./nest-cli.json:/app/nest-cli.json
+      - ./package.json:/app/package.json
+      - ./pnpm-lock.yaml:/app/pnpm-lock.yaml
+      - ./prisma.config.ts:/app/prisma.config.ts
+      # Uploads bind mount (DEV ONLY). Maps the container's /app/uploads to
+      # your host's backend/uploads/ folder so files written by the upload
+      # pipeline show up immediately in your file explorer for inspection.
+      # Stg/prod intentionally use a named volume instead — production
+      # uploads should never depend on host filesystem layout.
+      - ./uploads:/app/uploads
+      - /app/node_modules
+      # NOTE: do NOT mount an anonymous volume on /app/dist. nest-cli.json has
+      # `deleteOutDir: true`, so nest tries to rmdir /app/dist on every restart
+      # and a Docker volume mount makes that path busy → EBUSY crash loop.
+      # Letting /app/dist live in the container's writable layer is fine — it
+      # gets recreated on every build and never needs to escape the container.
 
   postgres:
     container_name: ${POSTGRES_CONTAINER_NAME:-postgres_dev}

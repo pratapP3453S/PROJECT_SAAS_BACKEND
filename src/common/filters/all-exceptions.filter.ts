@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { ApiError, ApiErrorPayload } from '../errors/api.error';
+import { ApiResponse, ErrorResponseBody } from '../responses/api.response';
 
 /**
  * AllExceptionsFilter — global last-resort exception handler.
@@ -46,22 +47,33 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     const { statusCode, errorPayload } = this.resolveException(exception);
 
-    const body = {
+    // Stack trace is included only outside production. Useful for the same
+    // reasons we ship a `details` field in dev: the developer who hits an
+    // error in their console wants to see exactly where it came from.
+    if (process.env.NODE_ENV !== 'production' && exception instanceof Error) {
+      errorPayload.stack = exception.stack;
+    }
+
+    const body: ErrorResponseBody = ApiResponse.attachDiagnostics({
       success: false,
       statusCode,
       error: errorPayload,
       timestamp: new Date().toISOString(),
       path: request.url,
-    };
+    });
 
-    // Log server errors
+    // Log server errors. Include the requestId so the log line can be joined
+    // with the response envelope's request.requestId field.
+    const reqId = body.request?.requestId ?? '-';
     if (statusCode >= 500) {
       this.logger.error(
-        `[${request.method}] ${request.url} -> ${statusCode}`,
+        `[${request.method}] ${request.url} -> ${statusCode} reqId=${reqId}`,
         exception instanceof Error ? exception.stack : String(exception),
       );
     } else {
-      this.logger.warn(`[${request.method}] ${request.url} -> ${statusCode} ${errorPayload.code}`);
+      this.logger.warn(
+        `[${request.method}] ${request.url} -> ${statusCode} ${errorPayload.code} reqId=${reqId}`,
+      );
     }
 
     response.status(statusCode).json(body);

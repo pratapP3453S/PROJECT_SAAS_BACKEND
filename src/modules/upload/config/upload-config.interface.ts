@@ -80,6 +80,12 @@ export interface UploadConfig {
   tempStoragePath: string;
   publicBaseUrl?: string;
 
+  /**
+   * HMAC-SHA256 secret used by LocalStorageProvider to sign presigned URLs
+   * pointing back at the API. Falls back to JWT_SECRET in dev.
+   */
+  localSigningSecret: string;
+
   maxFileSize: number;
   tempRetentionHours: number;
   maxConcurrentUploads?: number;

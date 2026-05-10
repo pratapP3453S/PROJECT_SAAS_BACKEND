@@ -5,6 +5,7 @@ import {
   PRESIGNED_URL_PROVIDER,
   STORAGE_PROVIDER,
 } from './constants/upload.constants';
+import { LocalDirectUploadController } from './controllers/local-direct.controller';
 import { IPresignedUrlProvider } from './interfaces/presigned-url.interface';
 import { IStorageProvider } from './interfaces/storage-provider.interface';
 import { CloudflareR2StorageProvider } from './providers/cloudflare-r2-storage.provider';
@@ -15,6 +16,7 @@ import { S3StorageProvider } from './providers/s3-storage.provider';
 import { AuditLoggerService } from './services/audit-logger.service';
 import { FileProcessorService } from './services/file-processor.service';
 import { FileValidatorService } from './services/file-validator.service';
+import { LocalSignedUrlService } from './services/local-signed-url.service';
 import { PresignedUrlService } from './services/presigned-url.service';
 import { UploadController } from './upload.controller';
 import { UploadService } from './upload.service';
@@ -52,6 +54,13 @@ const PROVIDER_CLASS_REGISTRY: Partial<Record<UploadProviderName, StorageProvide
  *    instantiated when not needed.
  *  - binds the same instance to both STORAGE_PROVIDER and PRESIGNED_URL_PROVIDER
  *    DI tokens via { useExisting: ProviderClass } — no double instantiation.
+ *
+ * Local-only extras
+ *  When UPLOAD_PROVIDER=local we also register:
+ *   - LocalSignedUrlService  : HMAC signer/verifier for local presigned URLs
+ *   - LocalDirectUploadController : public PUT/GET routes the signer points at
+ *  …and apply express.raw() middleware to the PUT route so the request body
+ *  arrives as a Buffer rather than going through the JSON parser.
  */
 @Module({})
 export class UploadModule {
@@ -65,6 +74,8 @@ export class UploadModule {
       );
     }
 
+    const isLocal = providerName === 'local';
+
     const providers: Provider[] = [
       UploadConfigService,
       FileValidatorService,
@@ -77,9 +88,18 @@ export class UploadModule {
       { provide: PRESIGNED_URL_PROVIDER, useExisting: ProviderClass },
     ];
 
+    const controllers: Type<unknown>[] = [UploadController];
+
+    if (isLocal) {
+      // Inject the signer into LocalStorageProvider (the @Optional() dep)
+      // by adding it to the providers list — Nest resolves it automatically.
+      providers.push(LocalSignedUrlService);
+      controllers.push(LocalDirectUploadController);
+    }
+
     return {
       module: UploadModule,
-      controllers: [UploadController],
+      controllers,
       providers,
       exports: [
         UploadService,
@@ -91,12 +111,14 @@ export class UploadModule {
     };
   }
 
-  /**
-   * Convenience — defaults to the env-driven provider, identical to forRoot().
-   * Lets `imports: [UploadModule]` keep working for callers who don't want to
-   * spell out forRoot().
-   */
+  /** Convenience — same as forRoot(). */
   static register(): DynamicModule {
     return UploadModule.forRoot();
   }
+
+  // Note: the express.raw() body parser for PUT /upload/local/direct is
+  // registered in main.ts (not here) because module-level forRoutes() path
+  // matching is ambiguous about whether it includes the global API prefix,
+  // whereas main.ts has direct access to the Express app and can match the
+  // exact prefixed URL deterministically.
 }

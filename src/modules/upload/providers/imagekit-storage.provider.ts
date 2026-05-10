@@ -87,15 +87,26 @@ export class ImageKitStorageProvider
     };
   }
 
-  async commitToPermanent(filename: string, type: string): Promise<StoredFile> {
+  /**
+   * Promote a temp file to /{folder}/{type}/{filename}.
+   *
+   * `tempIdentifier` may be a flat filename (server-mediated → look up under
+   * /{folder}/temp/{type}/) OR a full temp filePath like
+   * "/uploads/temp/u-7/aadhar/abc.png" (presigned → look up under that exact
+   * folder). Either way the destination is /{folder}/{type}/{filename}.
+   */
+  async commitToPermanent(tempIdentifier: string, type: string): Promise<StoredFile> {
     const safeType = this.safeSegment(type);
-    const safeFilename = this.extractFilename(filename);
-    const tempPath = `${this.tempFolder(safeType)}/${safeFilename}`;
+    const safeFilename = this.extractFilename(tempIdentifier);
+    const tempLookupFolder = tempIdentifier.includes('/')
+      ? this.parentFolder(tempIdentifier) // presigned: use the actual parent
+      : this.tempFolder(safeType); // server-mediated: use the registry folder
+    const tempPath = `${tempLookupFolder}/${safeFilename}`;
     const permanentFolder = this.permanentFolder(safeType);
 
     // 1. Look up the source file by path
     const list = await this.client.listFiles({
-      path: this.tempFolder(safeType),
+      path: tempLookupFolder,
       name: safeFilename,
       limit: 1,
     });
@@ -276,10 +287,22 @@ export class ImageKitStorageProvider
       size: head.size,
       contentType: head.mimeType,
       url: `${this.cfg.urlEndpoint.replace(/\/+$/, '')}/${input.fileKey.replace(/^\/+/, '')}`,
+      fileKey: input.fileKey,
     };
   }
 
   // ─── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * Extract the leading-slash parent folder of a full filePath.
+   * "/uploads/temp/u-7/aadhar/abc.png" → "/uploads/temp/u-7/aadhar"
+   */
+  private parentFolder(fullPath: string): string {
+    const normalised = fullPath.replace(/\\/g, '/').replace(/^\/?/, '/');
+    const slash = normalised.lastIndexOf('/');
+    if (slash <= 0) return '/';
+    return normalised.substring(0, slash);
+  }
 
   private tempFolder(uploadType?: string): string {
     const t = uploadType ? this.safeSegment(uploadType) : '';

@@ -18,6 +18,11 @@ services:
       REDIS_PORT: ${REDIS_PORT:-6379}
     ports:
       - "${PORT:-5010}:5010"
+    # Persistent named volume for uploads — survives container rebuilds.
+    # In real production this should typically be replaced by S3/R2/etc. via
+    # UPLOAD_PROVIDER, with the named volume only for transient temp/ files.
+    volumes:
+      - uploads_data:/app/uploads
     deploy:
       resources:
         limits:

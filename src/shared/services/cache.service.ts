@@ -1,6 +1,7 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cache } from 'cache-manager';
+import { RequestContext } from '../../common/context/request-context';
 
 /**
  * CacheService — application-level Redis cache abstraction.
@@ -38,27 +39,44 @@ export class CacheService {
   constructor(@Inject(CACHE_MANAGER) private readonly cacheManager: Cache) {}
 
   async get<T>(key: string): Promise<T | null> {
+    const startedAt = performance.now();
     try {
-      return (await this.cacheManager.get<T>(key)) ?? null;
+      const value = (await this.cacheManager.get<T>(key)) ?? null;
+      RequestContext.recordCache({
+        durationMs: performance.now() - startedAt,
+        hit: value !== null,
+        miss: value === null,
+      });
+      return value;
     } catch (error) {
+      RequestContext.recordCache({
+        durationMs: performance.now() - startedAt,
+        miss: true,
+      });
       this.logger.warn(`Cache GET failed for key "${key}": ${(error as Error).message}`);
       return null;
     }
   }
 
   async set<T>(key: string, value: T, ttlSeconds?: number): Promise<void> {
+    const startedAt = performance.now();
     try {
       await this.cacheManager.set(key, value, ttlSeconds ? ttlSeconds * 1000 : undefined);
     } catch (error) {
       this.logger.warn(`Cache SET failed for key "${key}": ${(error as Error).message}`);
+    } finally {
+      RequestContext.recordCache({ durationMs: performance.now() - startedAt });
     }
   }
 
   async del(key: string): Promise<void> {
+    const startedAt = performance.now();
     try {
       await this.cacheManager.del(key);
     } catch (error) {
       this.logger.warn(`Cache DEL failed for key "${key}": ${(error as Error).message}`);
+    } finally {
+      RequestContext.recordCache({ durationMs: performance.now() - startedAt });
     }
   }
 

@@ -103,10 +103,24 @@ export class S3StorageProvider
     };
   }
 
-  async commitToPermanent(filename: string, type: string): Promise<StoredFile> {
+  /**
+   * Promote a temp object to {permanentPrefix}/{type}/{filename}.
+   *
+   * `tempIdentifier` may be either:
+   *  - a flat filename (server-mediated saveTemp → {tempPrefix}/{type}/{filename}), OR
+   *  - a full temp key with userId namespacing (presigned →
+   *    {tempPrefix}/{userId}/{type}/{filename}).
+   *
+   * The presigned form is detected by the presence of '/' and used verbatim
+   * as the CopySource. Either way the destination is the same flat permanent
+   * shape, so DB schemas don't need to know which flow produced the file.
+   */
+  async commitToPermanent(tempIdentifier: string, type: string): Promise<StoredFile> {
     const safeType = this.safeSegment(type);
-    const safeFilename = this.extractFilename(filename);
-    const tempKey = this.buildTempKey(safeType, safeFilename);
+    const safeFilename = this.extractFilename(tempIdentifier);
+    const tempKey = tempIdentifier.includes('/')
+      ? this.normalizePath(tempIdentifier)
+      : this.buildTempKey(safeType, safeFilename);
     const permanentKey = this.buildPermanentKey(safeType, safeFilename);
 
     // Verify temp object exists.
@@ -295,6 +309,7 @@ export class S3StorageProvider
       size: head.size,
       contentType: head.mimeType,
       url: this.buildPublicUrl(input.fileKey),
+      fileKey: input.fileKey,
     };
   }
 

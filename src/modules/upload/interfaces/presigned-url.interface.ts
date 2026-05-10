@@ -65,6 +65,12 @@ export interface PresignedCompleteResult {
   contentType?: string;
   /** Public/temp URL the caller can persist. */
   url: string;
+  /**
+   * The verified temp key. Pass this back as `fileKey` to POST /upload/commit
+   * to promote the file to its permanent {type}/ location. Echoed here so
+   * clients don't have to remember the key issued by /presigned-url.
+   */
+  fileKey: string;
 }
 
 /** Per-provider signing logic. Bound to the PRESIGNED_URL_PROVIDER DI token. */

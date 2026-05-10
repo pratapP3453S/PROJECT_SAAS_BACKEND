@@ -21,6 +21,11 @@ services:
       dockerfile: Dockerfile
     ports:
       - "${PORT:-5000}:${PORT:-5000}"
+    # Note: /app/uploads is mounted by environment-specific overrides:
+    #   dev   → ./uploads     (bind mount, host-visible for live inspection)
+    #   stg   → uploads_data  (named volume, persistent across container rebuilds)
+    #   prod  → uploads_data  (same — production wants isolation, not host coupling)
+    # Base intentionally leaves the path unmounted so each env owns its policy.
     depends_on:
       postgres:
         condition: service_healthy

@@ -53,8 +53,18 @@ export interface IStorageProvider {
   /** Persist a processed file to temporary staging storage. */
   saveTemp(input: SaveFileInput): Promise<StoredFile>;
 
-  /** Promote a temp file to its permanent location under `type`. */
-  commitToPermanent(filename: string, type: string): Promise<StoredFile>;
+  /**
+   * Promote a temp file to its permanent location under `type`.
+   *
+   * `tempIdentifier` accepts BOTH forms produced by the upload pipeline:
+   *  - flat filename (server-mediated upload — leaf of /uploads/temp/...), or
+   *  - full temp key like "uploads/temp/u-7/aadhar/abc.png" (presigned upload).
+   *
+   * Implementations detect which form they received by looking for '/'.
+   * Both forms commit to the same flat permanent shape so persisted URLs
+   * never depend on which upload flow produced them.
+   */
+  commitToPermanent(tempIdentifier: string, type: string): Promise<StoredFile>;
 
   /** Idempotent delete by URL (false when already gone, never throws). */
   delete(fileUrl: string): Promise<boolean>;

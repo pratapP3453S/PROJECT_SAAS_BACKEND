@@ -2,6 +2,7 @@ import { CallHandler, ExecutionContext, Injectable, Logger, NestInterceptor } fr
 import { Request, Response } from 'express';
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
+import { RequestContext } from '../context/request-context';
 
 /**
  * LoggingInterceptor — per-request HTTP access logger.
@@ -41,15 +42,40 @@ export class LoggingInterceptor implements NestInterceptor {
         next: () => {
           const statusCode = response.statusCode;
           const duration = Date.now() - startTime;
-          this.logger.log(`${method} ${url} ${statusCode} ${duration}ms - ${ip} "${userAgent}"`);
+          this.logger.log(
+            `${method} ${url} ${statusCode} ${duration}ms ${this.timingTail()} - ${ip} "${userAgent}"`,
+          );
         },
         error: (error: Error) => {
           const duration = Date.now() - startTime;
           this.logger.warn(
-            `${method} ${url} ERROR ${duration}ms - ${ip} "${userAgent}" - ${error.message}`,
+            `${method} ${url} ERROR ${duration}ms ${this.timingTail()} - ${ip} "${userAgent}" - ${error.message}`,
           );
         },
       }),
     );
+  }
+
+  /**
+   * Compose the diagnostic tail of the access-log line:
+   *   "reqId=xxxxx db=5/12.4ms cache=2/0.8ms (1H/1M)"
+   * Reads from the active RequestContext — silently empty when no request scope.
+   */
+  private timingTail(): string {
+    const ctx = RequestContext.current();
+    if (!ctx) return '';
+    const parts = [`reqId=${ctx.requestId.slice(0, 8)}`];
+    if (ctx.dbQueries > 0) {
+      parts.push(`db=${ctx.dbQueries}/${ctx.dbTimeMs.toFixed(1)}ms`);
+    }
+    if (ctx.cacheOps > 0) {
+      parts.push(
+        `cache=${ctx.cacheOps}/${ctx.cacheTimeMs.toFixed(1)}ms (${ctx.cacheHits}H/${ctx.cacheMisses}M)`,
+      );
+    }
+    if (ctx.externalCalls > 0) {
+      parts.push(`ext=${ctx.externalCalls}/${ctx.externalTimeMs.toFixed(1)}ms`);
+    }
+    return parts.join(' ');
   }
 }
