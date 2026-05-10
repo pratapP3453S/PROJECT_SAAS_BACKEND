@@ -1,16 +1,38 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
+import { PRESIGNED_URL_PROVIDER } from '../constants/upload.constants';
+import { UploadConfigService } from '../config/upload-config.service';
 import {
+  IPresignedUrlProvider,
   IPresignedUrlService,
+  PresignedCompleteInput,
+  PresignedCompleteResult,
   PresignedUrlOptions,
   PresignedUrlResult,
 } from '../interfaces/presigned-url.interface';
-import { UploadConfigService } from '../config/upload-config.service';
 
+/**
+ * PresignedUrlService — thin facade over the active IPresignedUrlProvider.
+ *
+ * Why a facade?
+ *  - Controllers depend only on this service (no @Inject token needed elsewhere).
+ *  - Adds cross-cutting concerns: key construction, default expiry from config,
+ *    enable-flag enforcement.
+ *  - Keeps provider classes free of "default values" logic — they only sign.
+ */
 @Injectable()
 export class PresignedUrlService implements IPresignedUrlService {
-  constructor(private readonly uploadConfig: UploadConfigService) {}
+  constructor(
+    private readonly uploadConfig: UploadConfigService,
+    @Inject(PRESIGNED_URL_PROVIDER) private readonly provider: IPresignedUrlProvider,
+  ) {}
 
+  /**
+   * Build a deterministic, collision-free object key.
+   *  uploads/temp/{userId?}/{uploadType}/{uuid}{ext}
+   * Used as the signed-upload target key AND the key the caller passes back to
+   * /complete after the direct upload finishes.
+   */
   buildUploadKey(uploadType: string, originalFilename: string, userId?: string): string {
     const extension = this.extractExtension(originalFilename);
     const ownerPrefix = userId ? `${userId}/` : '';
@@ -22,84 +44,46 @@ export class PresignedUrlService implements IPresignedUrlService {
     uploadType: string,
     options: Partial<PresignedUrlOptions> = {},
   ): Promise<PresignedUrlResult> {
+    this.assertEnabled();
+    // Validates the type early so we don't sign for unknown categories.
     this.uploadConfig.getFileTypeConfig(uploadType);
-
-    const config = this.uploadConfig.getConfig();
-    const expirySeconds = options.expirySeconds ?? config.presignedUrlExpiry;
-    const expiresAt = this.expiresAt(expirySeconds);
-
-    if (config.provider === 'local') {
-      return {
-        url: `/upload/${uploadType}`,
-        method: 'POST',
-        expiresAt,
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        providerData: {
-          mode: 'api-proxy',
-          fieldName: 'file',
-          note: 'Local storage uses the API upload endpoint instead of a signed object-store URL.',
-        },
-      };
-    }
-
-    return this.unsupportedCloudProvider(config.provider, 'upload', fileKey, options, expiresAt);
+    return this.provider.generateUploadUrl(fileKey, uploadType, this.withDefaults(options));
   }
 
   async generateDownloadUrl(
     fileKey: string,
     options: Partial<PresignedUrlOptions> = {},
   ): Promise<PresignedUrlResult> {
-    const config = this.uploadConfig.getConfig();
-    const expiresAt = this.expiresAt(options.expirySeconds ?? config.presignedUrlExpiry);
-
-    if (config.provider === 'local') {
-      return {
-        url: fileKey.startsWith('/') ? fileKey : `/${fileKey}`,
-        method: 'GET',
-        expiresAt,
-      };
-    }
-
-    return this.unsupportedCloudProvider(config.provider, 'download', fileKey, options, expiresAt);
+    return this.provider.generateDownloadUrl(fileKey, this.withDefaults(options));
   }
 
   async generateDeleteUrl(
     fileKey: string,
     options: Partial<PresignedUrlOptions> = {},
   ): Promise<PresignedUrlResult> {
-    const config = this.uploadConfig.getConfig();
-    const expiresAt = this.expiresAt(options.expirySeconds ?? config.presignedUrlExpiry);
-    return this.unsupportedCloudProvider(config.provider, 'delete', fileKey, options, expiresAt);
+    this.assertEnabled();
+    return this.provider.generateDeleteUrl(fileKey, this.withDefaults(options));
   }
 
-  async validateUrl(url: string): Promise<boolean> {
-    return Boolean(url);
+  async completePresignedUpload(input: PresignedCompleteInput): Promise<PresignedCompleteResult> {
+    this.uploadConfig.getFileTypeConfig(input.uploadType);
+    return this.provider.completePresignedUpload(input);
   }
 
-  private expiresAt(expirySeconds: number): number {
-    return Math.floor((Date.now() + expirySeconds * 1000) / 1000);
+  // ─── Internals ────────────────────────────────────────────────────────────
+
+  private assertEnabled(): void {
+    if (!this.uploadConfig.getConfig().enablePresignedUrls) {
+      throw new Error(
+        'Presigned URLs are disabled. Set UPLOAD_ENABLE_PRESIGNED_URLS=true to enable.',
+      );
+    }
   }
 
-  private unsupportedCloudProvider(
-    provider: string,
-    operation: string,
-    fileKey: string,
-    options: Partial<PresignedUrlOptions>,
-    expiresAt: number,
-  ): PresignedUrlResult {
+  private withDefaults(options: Partial<PresignedUrlOptions>): Partial<PresignedUrlOptions> {
     return {
-      url: '',
-      method: options.method ?? (operation === 'download' ? 'GET' : 'PUT'),
-      expiresAt,
-      providerData: {
-        provider,
-        operation,
-        fileKey,
-        implementationRequired:
-          'Install the provider SDK and replace this method with a provider adapter. The controller and UploadService do not need to change.',
-      },
+      ...options,
+      expirySeconds: options.expirySeconds ?? this.uploadConfig.getConfig().presignedUrlExpiry,
     };
   }
 

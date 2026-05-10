@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Prisma, PrismaClient } from '@prisma/client';
+import { RequestContext } from '../../common/context/request-context';
 
 /**
  * PrismaService — database client wrapper (composition pattern).
@@ -58,12 +59,19 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     await this._client.$connect();
     this.logger.log('✅ Database connected successfully');
 
-    if (process.env.NODE_ENV === 'development') {
-      (this._client.$on as (event: 'query', cb: (e: Prisma.QueryEvent) => void) => void)(
-        'query',
-        (e) => this.logger.debug(`Query: ${e.query} (${e.duration}ms)`),
-      );
-    }
+    // Always-on hook: feed every query's duration into the active RequestContext
+    // so the response/error envelope can report `timing.dbMs` and
+    // `timing.dbQueries` end-to-end. Cheap (single function call per query).
+    // The dev-only debug log is preserved alongside the metric record.
+    (this._client.$on as (event: 'query', cb: (e: Prisma.QueryEvent) => void) => void)(
+      'query',
+      (e) => {
+        RequestContext.recordDb(e.duration);
+        if (process.env.NODE_ENV === 'development') {
+          this.logger.debug(`Query: ${e.query} (${e.duration}ms)`);
+        }
+      },
+    );
   }
 
   async onModuleDestroy(): Promise<void> {

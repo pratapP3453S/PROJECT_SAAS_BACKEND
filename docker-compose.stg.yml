@@ -17,7 +17,11 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: ${REDIS_PORT:-6379}
     ports:
-      - "${PORT:-5005}:3000"
+      - "${PORT:-5005}:5005"
+    # Persistent named volume for uploads — survives container rebuilds.
+    # Lives entirely inside Docker storage; no host coupling.
+    volumes:
+      - uploads_data:/app/uploads
     deploy:
       resources:
         limits:

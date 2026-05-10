@@ -436,6 +436,99 @@ THROTTLE_LIMIT=100
 
 ---
 
+## 📦 Upload Feature Configuration
+
+The upload module supports five backends: **local**, **AWS S3**, **Cloudflare R2**,
+**Cloudinary**, **ImageKit**. Pick one with `UPLOAD_PROVIDER` and provide the
+matching credentials. Provider selection is validated at boot — missing keys
+crash the app instead of failing at request time.
+
+### Cross-provider switches
+
+```env
+UPLOAD_PROVIDER=local                # local | s3 | cloudflare | cloudinary | imagekit
+MAX_FILE_SIZE_MB=10                  # also enforced by Multer
+UPLOAD_DEST=./uploads                # local-only base path
+UPLOAD_TEMP_RETENTION_HOURS=24       # cleanup job threshold
+UPLOAD_PRESIGNED_EXPIRY=3600         # signed URL TTL (seconds)
+UPLOAD_ENABLE_PRESIGNED_URLS=true
+UPLOAD_ENABLE_ENCRYPTION=true
+UPLOAD_ENABLE_AUDIT=true
+UPLOAD_AUDIT_DESTINATION=database    # database | file | cloudwatch
+UPLOAD_PUBLIC_BASE_URL=              # optional CDN/origin prefix
+UPLOAD_LOCAL_SIGNING_SECRET=         # HMAC secret for local presigned URLs
+                                     # (falls back to JWT_SECRET if empty;
+                                     #  set explicitly in production, ≥ 32 chars)
+```
+
+> **Local presigned URLs.** When `UPLOAD_PROVIDER=local`, the API also exposes
+> `PUT /upload/local/direct` and `GET /upload/local/direct`. These are the local
+> equivalent of S3's signed URLs — anyone holding the URL can upload/download
+> the named key, but only until the signed expiry and only with the signed
+> content-type/max-size constraints. The HMAC secret used to sign these URLs is
+> `UPLOAD_LOCAL_SIGNING_SECRET`. In dev you can leave it blank to inherit
+> `JWT_SECRET`; in production, generate a dedicated 32+ char secret with
+> `openssl rand -base64 48`.
+
+### AWS S3 (`UPLOAD_PROVIDER=s3`)
+```env
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=my-bucket
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_S3_ENDPOINT=                     # leave empty for AWS, set for MinIO/etc.
+AWS_S3_FORCE_PATH_STYLE=false
+AWS_S3_PUBLIC_URL=https://cdn.example.com
+AWS_S3_TEMP_PREFIX=uploads/temp
+AWS_S3_PERMANENT_PREFIX=uploads
+```
+
+### Cloudflare R2 (`UPLOAD_PROVIDER=cloudflare`)
+```env
+CF_ACCOUNT_ID=abc123
+CF_ACCESS_KEY_ID=...
+CF_SECRET_ACCESS_KEY=...
+CF_BUCKET_NAME=my-r2-bucket
+CF_ENDPOINT=                         # auto-derived from CF_ACCOUNT_ID if empty
+CF_PUBLIC_URL=https://files.example.com   # custom domain or *.r2.dev
+```
+
+### Cloudinary (`UPLOAD_PROVIDER=cloudinary`)
+```env
+# Either:
+CLOUDINARY_URL=cloudinary://key:secret@cloud-name
+# Or all three of:
+CLOUDINARY_CLOUD_NAME=my-cloud
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+
+CLOUDINARY_FOLDER=uploads
+CLOUDINARY_USE_SIGNED=true           # required for production
+CLOUDINARY_SECURE=true               # use https URLs
+```
+
+### ImageKit (`UPLOAD_PROVIDER=imagekit`)
+```env
+IMAGEKIT_PUBLIC_KEY=public_...
+IMAGEKIT_PRIVATE_KEY=private_...
+IMAGEKIT_URL_ENDPOINT=https://ik.imagekit.io/your_id
+IMAGEKIT_FOLDER=uploads
+IMAGEKIT_USE_UNIQUE_FILENAME=true
+```
+
+### Choosing a provider
+
+| Use case | Pick |
+|---|---|
+| Local dev, CI, single-host self-hosted | `local` |
+| Generic object storage with CloudFront/CDN | `s3` |
+| Cheap egress, S3-compatible | `cloudflare` |
+| Image-heavy product (auto transform/CDN) | `cloudinary` or `imagekit` |
+| Need transformation URLs with query params | `imagekit` (cleaner URLs) |
+| Need video transcoding too | `cloudinary` |
+
+---
+
 ## 🔐 Security Checklist
 
 Before deploying, ensure you've:

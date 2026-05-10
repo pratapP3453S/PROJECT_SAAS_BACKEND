@@ -24,6 +24,11 @@ export interface ApiErrorPayload {
   message: string;
   details?: string;
   fields?: FieldError[];
+  /**
+   * Stack trace for the originating exception. Populated by AllExceptionsFilter
+   * outside production. Never sent in prod responses to avoid leaking internals.
+   */
+  stack?: string;
 }
 
 /**

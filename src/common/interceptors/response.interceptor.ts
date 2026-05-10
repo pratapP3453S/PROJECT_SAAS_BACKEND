@@ -5,26 +5,22 @@ import { map } from 'rxjs/operators';
 import { ApiResponse, SuccessResponseBody } from '../responses/api.response';
 
 /**
- * ResponseInterceptor — wraps raw controller return values in a success envelope.
+ * ResponseInterceptor — wraps controller return values in the standard envelope
+ * AND stamps diagnostics (`request`, `timing`, `server`, `tags`) onto every
+ * response by reading the active RequestContext.
  *
- * Responsibility: Ensures every successful response has a consistent shape:
- * { success, statusCode, message, data, timestamp, path }.
- * Registered globally via APP_INTERCEPTOR in AppModule.
+ * Behaviour
+ *  - If the controller already returned a structured envelope (object with
+ *    `success: true`), we don't re-wrap — but we still attach diagnostics if
+ *    they're missing. That way controllers using ApiResponse.fromDefinition()
+ *    get the rich meta for free.
+ *  - If the controller returned a plain value, we wrap with buildSuccess and
+ *    then attach diagnostics.
  *
- * Flow:
- * 1. next.handle() — executes the route handler; emits the controller's return value.
- * 2. map() — checks if the value is already a structured SuccessResponseBody
- *    (identified by the presence of a `success` key). If so, pass through unchanged
- *    so controllers that build their own envelope are not double-wrapped.
- * 3. Otherwise, delegates to ApiResponse.buildSuccess() with the route's current
- *    statusCode and URL path.
- *
- * Note: Controllers in this project build their own envelopes (with custom messages),
- * so the pass-through branch handles the majority of cases. This interceptor is the
- * safety net for any handler that returns a plain value without an envelope.
- *
- * Used by: AppModule (APP_INTERCEPTOR provider)
- * See also: ApiResponse.buildSuccess() → src/common/responses/api.response.ts
+ * Why attach diagnostics here and not in ApiResponse.fromDefinition?
+ *  fromDefinition runs synchronously inside the controller — that's BEFORE the
+ *  request finishes, so timing.totalMs would be wrong. The interceptor is the
+ *  last hop before the response is serialised, so it gets the true latency.
  */
 @Injectable()
 export class ResponseInterceptor<T> implements NestInterceptor<T, SuccessResponseBody<T>> {
@@ -34,12 +30,20 @@ export class ResponseInterceptor<T> implements NestInterceptor<T, SuccessRespons
 
     return next.handle().pipe(
       map((data) => {
-        // If the response is already a structured SuccessResponseBody, return as-is
+        // Already a structured envelope — only attach diagnostics, don't rewrap.
         if (data && typeof data === 'object' && 'success' in data) {
-          return data as unknown as SuccessResponseBody<T>;
+          return ApiResponse.attachDiagnostics(
+            data as unknown as SuccessResponseBody<T>,
+          );
         }
 
-        return ApiResponse.buildSuccess('Operation successful', data, statusCode, request.url);
+        const body = ApiResponse.buildSuccess(
+          'Operation successful',
+          data,
+          statusCode,
+          request.url,
+        );
+        return ApiResponse.attachDiagnostics(body);
       }),
     );
   }

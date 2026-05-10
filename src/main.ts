@@ -40,6 +40,12 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
     cors: false, // Configured manually below
+    // rawBody:true tells NestJS to also keep the un-parsed body bytes on
+    // req.rawBody alongside the parsed req.body. Critical for the local
+    // presigned upload route (PUT /api/v1/upload/local/direct) which receives
+    // raw file bytes — without this the body-parser silently consumes the
+    // stream and the handler sees an empty body.
+    rawBody: true,
   });
 
   // ─── Security ─────────────────────────────────────────────────────────────

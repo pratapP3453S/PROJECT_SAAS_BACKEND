@@ -1,144 +1,270 @@
-# Upload Feature Developer Guide
+# Upload Feature — Developer Guide
 
-## Purpose
+The upload feature is a class-based file pipeline. The HTTP layer (controller)
+only marshals requests; orchestration, validation, processing, audit, signing,
+and storage are separate injectable classes. Five backends are wired and
+production-ready: **Local, AWS S3, Cloudflare R2, Cloudinary, ImageKit**.
 
-The upload feature is a class-based file pipeline. The controller handles HTTP only; the service orchestrates the flow; validation, processing, audit logging, presigned URL generation, and storage are separate injectable classes.
+It is **closed for modification, open for extension**: adding a new backend
+means writing a new provider class and adding one entry to the
+`PROVIDER_CLASS_REGISTRY` map in `upload.module.ts`. Nothing else changes.
 
-The design goal is open for extension and closed for core edits. New storage backends should be added by implementing the storage contract and changing provider binding/config, not by rewriting controller or service logic.
+---
 
-## Active Runtime Classes
+## Architecture in one picture
 
-- `upload.controller.ts`: authenticated API routes.
-- `upload.service.ts`: orchestration for upload, commit, delete, and temp cleanup.
-- `config/upload-config.service.ts`: provider selection and upload-type rules.
-- `services/file-validator.service.ts`: size, MIME, and magic-byte validation.
-- `services/file-processor.service.ts`: image transformation and pass-through processing for documents.
-- `services/audit-logger.service.ts`: non-blocking operation audit trail.
-- `services/presigned-url.service.ts`: direct-upload URL contract.
-- `providers/local-storage.provider.ts`: active local disk provider.
-- `providers/s3-storage.provider.ts`: adapter slot for AWS S3 implementation.
-- `providers/cloudflare-r2-storage.provider.ts`: adapter slot for Cloudflare R2 implementation.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  HTTP                                                               │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ UploadController                                            │    │
+│  │  POST   /upload/:type                  (server-mediated)    │    │
+│  │  POST   /upload/commit                                      │    │
+│  │  DELETE /upload/remove                                      │    │
+│  │  POST   /upload/presigned-url          (direct upload init) │    │
+│  │  POST   /upload/presigned-url/complete (verify direct)      │    │
+│  │  POST   /upload/download-url           (signed downloads)   │    │
+│  └────────────┬─────────────────────────────────┬──────────────┘    │
+│               │                                 │                   │
+│  ┌────────────▼─────────────┐    ┌──────────────▼──────────────┐    │
+│  │ UploadService            │    │ PresignedUrlService         │    │
+│  │  processFile/commit/...  │    │  (thin facade)              │    │
+│  └────────────┬─────────────┘    └──────────────┬──────────────┘    │
+│               │                                 │                   │
+│  ┌────────────┴───────────┬─────────────────────┴────────────┐      │
+│  │ FileValidator | FileProcessor | EncryptionService | Audit │      │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  DI tokens                                                          │
+│   STORAGE_PROVIDER         → IStorageProvider     (active backend)  │
+│   PRESIGNED_URL_PROVIDER   → IPresignedUrlProvider (same class)     │
+│                                                                     │
+│  Provider registry (UploadModule.forRoot)                           │
+│   local      → LocalStorageProvider                                 │
+│   s3         → S3StorageProvider                                    │
+│   cloudflare → CloudflareR2StorageProvider                          │
+│   cloudinary → CloudinaryStorageProvider                            │
+│   imagekit   → ImageKitStorageProvider                              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-## API Flow
+---
 
-### API-Proxy Upload
+## Class catalogue
 
-`POST /upload/:type`
+| File | Class | Role |
+|---|---|---|
+| `upload.controller.ts` | `UploadController` | HTTP boundary; six endpoints, all behind `JwtAuthGuard`. |
+| `upload.service.ts` | `UploadService` | Orchestrates validate → process → encrypt → store; commit, delete, cleanup. |
+| `services/presigned-url.service.ts` | `PresignedUrlService` | Facade over the active `IPresignedUrlProvider`. Adds defaults + key construction. |
+| `services/file-validator.service.ts` | `FileValidatorService` | Size, MIME whitelist, magic-byte content sniffing. |
+| `services/file-processor.service.ts` | `FileProcessorService` | Sharp pipeline: rotate → resize → convert → compress. |
+| `services/audit-logger.service.ts` | `AuditLoggerService` | Non-blocking audit trail; pluggable destinations. |
+| `config/upload-config.service.ts` | `UploadConfigService` | Loads + validates env; per-type rule registry; fail-fast on missing keys. |
+| `providers/base-storage.provider.ts` | `BaseStorageProvider` | Common helpers (logging, key/URL normalisation, sanitisation). |
+| `providers/local-storage.provider.ts` | `LocalStorageProvider` | Local FS, atomic temp→permanent rename, HMAC-signed presigned URLs. |
+| `services/local-signed-url.service.ts` | `LocalSignedUrlService` | HMAC-SHA256 signer/verifier for the local presigned flow (constant-time). |
+| `controllers/local-direct.controller.ts` | `LocalDirectUploadController` | Public PUT/GET routes the signed URLs point at; signature is the auth. |
+| `providers/s3-storage.provider.ts` | `S3StorageProvider` | AWS SDK v3, full presigned PUT/GET/DELETE + CDN URL. |
+| `providers/cloudflare-r2-storage.provider.ts` | `CloudflareR2StorageProvider` | Extends S3 with R2 endpoint + path-style URLs. |
+| `providers/cloudinary-storage.provider.ts` | `CloudinaryStorageProvider` | Cloudinary `upload_stream` + signed direct uploads. |
+| `providers/imagekit-storage.provider.ts` | `ImageKitStorageProvider` | ImageKit SDK + HMAC-SHA1 token signing. |
 
-1. `JwtAuthGuard` authenticates the user.
-2. Multer writes the raw file to local temp disk.
-3. `UploadController` rejects missing file bodies.
-4. `UploadService.processFile()` starts an audit entry.
-5. `FileValidatorService` validates:
-   - configured upload type,
-   - MIME type,
-   - file size,
-   - magic bytes from the raw file.
-6. `FileProcessorService` transforms images when type config has processing rules.
-7. Documents or unprocessed types pass through unchanged.
-8. `EncryptionService` encrypts the processed buffer when `UploadConfigService.shouldEncrypt(type)` is true.
-9. `IStorageProvider.saveTemp()` stores the final bytes in temp storage.
-10. The raw Multer file is deleted.
-11. The response returns `tempUrl`, `serverFileName`, `mimeType`, `size`, and `isEncrypted`.
+Every provider implements **both** `IStorageProvider` and `IPresignedUrlProvider`.
 
-### Commit
+---
 
-`POST /upload/commit`
+## API flows
 
-1. Controller validates `CommitFileDto`.
-2. `UploadService.commitFile()` validates the upload type exists.
-3. `IStorageProvider.commitToPermanent(filename, type)` promotes the file.
-4. Local storage moves from `uploads/temp/{filename}` to `uploads/{type}/{filename}`.
-5. The response returns `permanentUrl` and `serverFileName`.
+### 1. Server-mediated upload (works for every backend)
 
-The caller owns DB state changes around this flow. Usually:
+`POST /upload/:type` (multipart/form-data, field `file`)
 
-1. Upload file and store `tempUrl`.
-2. Create or update the business record.
-3. Commit file.
-4. Store `permanentUrl` and clear `tempUrl`.
+```
+client → POST /upload/:type
+              │
+              ▼
+        Multer (field=file, max=MAX_FILE_SIZE_MB)
+              │ writes raw bytes to ./uploads/temp/{uuid}{ext}
+              ▼
+        UploadController.upload()
+              │ rejects empty body
+              ▼
+        UploadService.processFile()
+              │ ① audit START
+              │ ② FileValidator.validate (MIME, size, magic-bytes)
+              │ ③ fs.readFile(rawPath) → Buffer
+              │ ④ FileProcessor.process (Sharp pipeline)
+              │ ⑤ EncryptionService.encryptBuffer (if sensitive type)
+              │ ⑥ STORAGE_PROVIDER.saveTemp(input)
+              │ ⑦ delete raw Multer temp file
+              │ ⑧ audit COMPLETE
+              ▼
+        201 { tempUrl, serverFileName, mimeType, size, isEncrypted }
+```
 
-### Delete
+Then promote with `POST /upload/commit { filename, type }` once your DB
+record points at it.
 
-`DELETE /upload/remove`
+### 2. Direct browser → cloud upload (presigned)
 
-1. Controller validates `RemoveFileDto`.
-2. `UploadService.removeFile()` delegates deletion to the storage provider.
-3. Providers return `false` for missing files.
-4. Controller maps missing files to `ERR_FILE_NOT_FOUND`.
+```
+① client                 ② cloud storage (S3 / R2 / Cloudinary / ImageKit)
+   │                                      ▲
+   ▼                                      │ direct PUT/POST (bytes)
+   POST /upload/presigned-url ────► server returns { url, formData?, fileKey }
+   │
+   ▼ (use the url + headers/formData)
+   PUT/POST {url}    ◀──── bytes go straight to storage, server never touches them
+   │
+   ▼
+   POST /upload/presigned-url/complete  { fileKey, type, size, providerReceipt }
+                                  │
+                                  ▼
+   server: STORAGE_PROVIDER.head(fileKey) → verify exists & size matches
+   200 OK { exists, size, contentType, url }
+```
 
-### Direct Upload URL
+The `complete` step is **mandatory**. The server is offline during step ②, so
+without it a malicious client can claim "I uploaded X" without ever doing so.
 
-`POST /upload/presigned-url`
+### 3. Signed download
 
-This endpoint creates a provider-specific direct-upload contract.
+`POST /upload/download-url { fileKey, expirySeconds? }` → time-limited URL the
+browser can fetch directly. Used for private types (`document`, `aadhar`,
+`identity`, `passport`).
 
-- For `local`, it returns the normal API upload route because local disk cannot issue object-store signed URLs.
-- For S3 or R2, implement provider-specific signing inside `PresignedUrlService` or a dedicated adapter without changing `UploadController` or `UploadService`.
+### Commit accepts both temp shapes
 
-## Extension Points
+`POST /upload/commit` accepts either `{ filename, type }` (server-mediated
+upload — leaf returned in `tempUrl`) or `{ fileKey, type }` (presigned upload —
+the full key returned by `/presigned-url` and echoed by `/complete`). The
+active provider detects which form it received and resolves the source object
+accordingly. Both forms collapse to the same flat permanent shape, so a
+presigned aadhar upload at `uploads/temp/u-7/aadhar/abc.png` ends up at
+`uploads/aadhar/abc.png` — exactly the layout server-mediated uploads produce.
+Persisted URLs never depend on which upload flow created them.
 
-### Storage Provider
+### 4. Local provider — HMAC-signed presigned URLs
 
-Implement `IStorageProvider`:
+The local provider implements the same presigned-URL contract as S3/R2/Cloudinary/ImageKit.
+The signature is HMAC-SHA256 over `(method, key, expire, contentType, maxSize)`,
+keyed by `UPLOAD_LOCAL_SIGNING_SECRET` (or `JWT_SECRET` as fallback).
 
-- `saveTemp(input)`
-- `commitToPermanent(filename, type)`
-- `delete(fileUrl)`
-- `cleanupTemp(olderThanHours)`
+```
+client → POST /upload/presigned-url       → server returns
+            {
+              url:    "/upload/local/direct?key=…&expire=…&ct=…&max=…&sig=…",
+              method: "PUT",
+              fileKey, expiresAt, headers: { Content-Type: "image/jpeg" }
+            }
 
-Then bind it through `STORAGE_PROVIDER` in `upload.module.ts`. The service consumes only the interface.
+client → PUT  {url}                       → bytes go to LocalDirectUploadController
+            └─ NO Authorization header needed; signature IS the auth
+            └─ Body: raw bytes (NOT multipart). Content-Type must match `ct`.
 
-### File Type
+client → POST /upload/presigned-url/complete → server verifies file landed,
+                                               returns {exists, size, url}
+```
 
-Add or update file rules in `UploadConfigService.loadFileTypeRegistry()`:
+Why a separate `LocalDirectUploadController`?
+- The traditional `POST /upload/:type` endpoint stays exactly as before — Multer,
+  validation, processing, encryption, audit — for callers who want a
+  one-shot server-side pipeline.
+- The new `PUT /upload/local/direct` endpoint accepts raw bytes only when the
+  signature checks out. It mirrors S3's PUT-style presigned URL behaviour.
+- Same key shape (`uploads/temp/{userId}/{type}/{uuid}{ext}`) means
+  `cleanupTemp` and the `commit` step work for both flows.
+- `assertWritableKey()` refuses any key not under `uploads/temp/`, so signed
+  URLs cannot bypass the temp/commit ladder.
+- DELETE is intentionally NOT signed — local deletes still go through the
+  authenticated `DELETE /upload/remove`.
 
-- allowed MIME types,
-- processing rules,
-- encryption flag,
-- public/private access,
-- retention expectations.
+---
 
-### Processing
+## Configuration
 
-Image behavior belongs in `FileProcessorService`. Storage providers must not resize, convert, or encrypt files.
+All configuration is environment-driven; the active provider's required keys
+are validated at boot inside `UploadConfigService.validateActiveProvider()`.
+See `.env.example` for the full reference. Quick map:
 
-### Validation
+| Provider | Env vars |
+|---|---|
+| `local` | `UPLOAD_DEST`, `UPLOAD_LOCAL_SIGNING_SECRET` (or falls back to `JWT_SECRET`) |
+| `s3` | `AWS_REGION`, `AWS_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_S3_ENDPOINT`, `AWS_S3_PUBLIC_URL`, `AWS_S3_FORCE_PATH_STYLE`, `AWS_S3_TEMP_PREFIX`, `AWS_S3_PERMANENT_PREFIX` |
+| `cloudflare` | `CF_ACCOUNT_ID`, `CF_ACCESS_KEY_ID`, `CF_SECRET_ACCESS_KEY`, `CF_BUCKET_NAME`, optional `CF_PUBLIC_URL`, `CF_ENDPOINT` |
+| `cloudinary` | Either `CLOUDINARY_URL`, or `CLOUDINARY_CLOUD_NAME` + `CLOUDINARY_API_KEY` + `CLOUDINARY_API_SECRET`. Optional `CLOUDINARY_FOLDER`, `CLOUDINARY_UPLOAD_PRESET`, `CLOUDINARY_USE_SIGNED`, `CLOUDINARY_SECURE` |
+| `imagekit` | `IMAGEKIT_PUBLIC_KEY`, `IMAGEKIT_PRIVATE_KEY`, `IMAGEKIT_URL_ENDPOINT`, optional `IMAGEKIT_FOLDER`, `IMAGEKIT_USE_UNIQUE_FILENAME` |
 
-Validation belongs in `FileValidatorService`. Add virus scanning or deeper document checks behind a validator interface rather than inside the controller.
+Cross-provider switches: `MAX_FILE_SIZE_MB`, `UPLOAD_TEMP_RETENTION_HOURS`,
+`UPLOAD_PRESIGNED_EXPIRY`, `UPLOAD_ENABLE_PRESIGNED_URLS`, `UPLOAD_ENABLE_ENCRYPTION`,
+`UPLOAD_ENABLE_AUDIT`, `UPLOAD_PUBLIC_BASE_URL`.
 
-### Audit
+---
 
-Audit logging belongs in `AuditLoggerService`. It must never fail the main upload flow.
+## Extension points
 
-## Current Upload Types
+### Add a new storage backend
 
-- `avatar`: public image, converted to WebP, resized to 512x512 max, not encrypted.
-- `document`: private document, no image conversion, encrypted.
-- `aadhar`: private image, converted to WebP, encrypted.
-- `identity`: private image, converted to WebP, encrypted.
-- `passport`: private image, converted to WebP, encrypted.
+1. Create `providers/my-backend-storage.provider.ts`:
+   ```ts
+   @Injectable()
+   export class MyBackendStorageProvider extends BaseStorageProvider
+     implements IPresignedUrlProvider {
+     constructor(private readonly cfg: UploadConfigService) { super('MyBackend'); }
+     async saveTemp(input)       { /* … */ }
+     async commitToPermanent()   { /* … */ }
+     async delete(fileUrl)       { /* … */ }
+     async cleanupTemp(hours?)   { /* … */ }
+     async head(key)             { /* … */ }
+     async generateUploadUrl()   { /* … */ }
+     async generateDownloadUrl() { /* … */ }
+     async generateDeleteUrl()   { /* … */ }
+     async completePresignedUpload(input) { /* … */ }
+   }
+   ```
 
-## Provider Migration Path
+2. In `upload.module.ts` add ONE line to `PROVIDER_CLASS_REGISTRY`:
+   ```ts
+   const PROVIDER_CLASS_REGISTRY = {
+     local: LocalStorageProvider,
+     s3: S3StorageProvider,
+     // ...
+     mybackend: MyBackendStorageProvider,   // ← only edit
+   };
+   ```
 
-To move from local disk to S3 or Cloudflare R2:
+3. Add the provider's env block to `.env.example` and document required keys
+   in `UploadConfigService.validateActiveProvider()`.
 
-1. Install the provider SDK.
-2. Implement the adapter in `providers/s3-storage.provider.ts` or `providers/cloudflare-r2-storage.provider.ts`.
-3. Implement signing in `PresignedUrlService` or delegate signing to a provider-specific signer class.
-4. Add provider credentials to config and environment validation.
-5. Bind the provider in `upload.module.ts`.
-6. Set `UPLOAD_PROVIDER`.
-7. Verify upload, commit, delete, cleanup, and presigned-url behavior.
+`UploadController`, `UploadService`, `PresignedUrlService` and every other file
+stay untouched. That is the OCP guarantee.
 
-No controller or orchestration service logic should need to change.
+### Add a new upload type
 
-## Risk Notes
+Add an entry to `UploadConfigService.loadFileTypeRegistry()` with the MIME
+whitelist, processing pipeline, encryption flag, retention, and access policy.
 
-- API-proxy uploads still use Multer because the server must receive the bytes before local storage or server-side processing.
-- Direct object-store uploads bypass server-side processing unless you add an async processing job after upload completion.
-- Temp file and DB record consistency is caller-owned. Failed DB writes after upload can leave temp files until cleanup.
-- Encrypted files require the same `IMAGE_ENCRYPTION_KEY` to decrypt later.
-- Do not let storage providers accept path traversal. Local storage normalizes filenames and managed paths.
-- Placeholder S3/R2 providers fail loudly until real SDK implementations are installed.
+### Pluggable validation / processing / audit
 
+`FileValidatorService`, `FileProcessorService`, `AuditLoggerService` each
+implement an interface (`IFileValidator`, `IFileProcessor`, `IAuditLogger`).
+Swap implementations by editing one entry in the module providers — no consumer
+changes.
+
+---
+
+## Risk notes
+
+- **Presigned-URL `complete` is not optional.** Never write a file URL to the DB
+  on the basis of a client claim alone — always call `/complete` first so the
+  storage backend confirms the bytes arrived.
+- **Cloudinary/ImageKit transcode media.** `head()` size may differ from what
+  the client uploaded; size verification uses a tolerance window.
+- **Local mode in production:** disk-backed uploads don't survive container
+  restarts. Use a mounted volume or switch to a cloud provider.
+- **AES-256 keys must remain stable.** Re-keying breaks all previously
+  encrypted files unless you build a re-encryption job.
+- **R2 has no default public URL.** Configure `CF_PUBLIC_URL` (custom domain or
+  `r2.dev` URL) or always use signed download URLs.

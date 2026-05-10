@@ -1,213 +1,424 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Errors } from '../../../common/constants/error.constants';
 import { ApiError } from '../../../common/errors/api.error';
 import { UploadConfigService } from '../config/upload-config.service';
 import {
-  IStorageProvider,
+  IPresignedUrlProvider,
+  PresignedCompleteInput,
+  PresignedCompleteResult,
+  PresignedUrlOptions,
+  PresignedUrlResult,
+} from '../interfaces/presigned-url.interface';
+import {
+  ObjectHead,
   SaveFileInput,
   StoredFile,
 } from '../interfaces/storage-provider.interface';
+import { LocalSignedUrlService } from '../services/local-signed-url.service';
+import { BaseStorageProvider } from './base-storage.provider';
 
 /**
- * LocalStorageProvider — IStorageProvider implementation backed by the local filesystem.
+ * LocalStorageProvider — IStorageProvider on the local filesystem.
  *
- * Responsibility: Handles all byte-level I/O for the upload feature when running
- * on a single server with a local disk. Implements IStorageProvider so it can be
- * swapped for S3StorageProvider or CloudinaryStorageProvider by changing one line
- * in UploadModule — no changes to UploadService or UploadController.
+ * Layout (relative to process.cwd()):
+ *   {UPLOAD_DEST}/
+ *     temp/        ← saveTemp() writes here
+ *     {type}/      ← commitToPermanent() moves the processed file here
  *
- * Storage layout (relative to process.cwd()):
- *  uploads/
- *    temp/         ← saveTemp() writes here; Multer also writes raw uploads here
- *    {type}/       ← commitToPermanent() moves the processed file here
+ * Public URLs (relative to API root):
+ *   Temp       /uploads/temp/{filename}
+ *   Permanent  /uploads/{type}/{filename}
  *
- * URL convention:
- *  Temp    : /uploads/temp/{filename}
- *  Permanent: /uploads/{type}/{filename}
+ * The local provider supports BOTH upload paths:
+ *  1. Server-mediated  : POST /upload/:type        (Multer + processing pipeline)
+ *  2. HMAC-presigned   : POST /upload/presigned-url → PUT /upload/local/direct
  *
- * Methods (implements IStorageProvider):
- *  saveTemp(input)                 : fs.writeFileSync(uploads/temp/{filename}, buffer)
- *  commitToPermanent(filename,type): fs.renameSync(temp → uploads/{type}/{filename})
- *  delete(fileUrl)                 : fs.promises.unlink(resolved absolute path)
- *  cleanupTemp(olderThanHours=24)  : stat each file in uploads/temp/, unlink if stale
+ * Path 2 mirrors the cloud-provider contract bit-for-bit. The signed URL is a
+ * bearer credential carrying {key, expire, contentType, maxSize}; the
+ * `LocalDirectUploadController` verifies the signature, then this provider's
+ * `writeDirectUpload()` lands the bytes under uploads/temp/<key>.
  *
- * Injected by: UploadModule → { provide: STORAGE_PROVIDER, useClass: LocalStorageProvider }
- * Consumed by: UploadService via @Inject(STORAGE_PROVIDER) private storage: IStorageProvider
- *
- * To migrate to S3:
- *  1. Create S3StorageProvider implements IStorageProvider.
- *  2. Change UploadModule: useClass: LocalStorageProvider → useClass: S3StorageProvider.
- *  3. LocalStorageProvider can be deleted or kept for local/dev environments.
+ * `LocalSignedUrlService` is injected as @Optional() so the class still works
+ * in unit tests / fixture builds where only the synchronous saveTemp/commit
+ * surface matters and no signing is wired.
  */
 @Injectable()
-export class LocalStorageProvider implements IStorageProvider {
-  private readonly logger = new Logger(LocalStorageProvider.name);
+export class LocalStorageProvider
+  extends BaseStorageProvider
+  implements IPresignedUrlProvider
+{
   private readonly baseDir: string;
   private readonly tempDir: string;
 
-  constructor(private readonly uploadConfig: UploadConfigService) {
-    this.baseDir = path.resolve(process.cwd(), this.uploadConfig.getConfig().localStoragePath);
+  constructor(
+    private readonly uploadConfig: UploadConfigService,
+    @Optional() private readonly signer?: LocalSignedUrlService,
+  ) {
+    super('Local');
+    this.baseDir = path.resolve(process.cwd(), uploadConfig.getConfig().localStoragePath);
     this.tempDir = path.join(this.baseDir, 'temp');
     this.ensureDir(this.baseDir);
     this.ensureDir(this.tempDir);
   }
 
-  /**
-   * Creates a directory (and all missing parents) if it does not already exist.
-   * Called by: constructor (uploads/, uploads/temp/), commitToPermanent().
-   *
-   * @param dir - Absolute path to the directory to create.
-   */
-  private ensureDir(dir: string): void {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  }
+  // ─── IStorageProvider ─────────────────────────────────────────────────────
 
-  /**
-   * Writes a processed file buffer to uploads/temp/ on the local filesystem.
-   * Called by: UploadService.processFile() after Sharp conversion + optional encryption.
-   *
-   * Flow:
-   * 1. ensureDir(uploads/temp/) — guard against manual directory deletion at runtime.
-   * 2. Build the absolute destination path: uploads/temp/{input.filename}.
-   * 3. fs.writeFileSync(destPath, input.buffer) — synchronous write (atomic on most OSes).
-   * 4. Return StoredFile { url: '/uploads/temp/{filename}', filename, size }.
-   *
-   * @param input - SaveFileInput with the processed buffer and metadata.
-   * @returns StoredFile with the temp URL.
-   */
   async saveTemp(input: SaveFileInput): Promise<StoredFile> {
     this.ensureDir(this.tempDir);
     const safeFilename = path.basename(input.filename);
     const destPath = path.join(this.tempDir, safeFilename);
     fs.writeFileSync(destPath, input.buffer);
-    this.logger.log(`File saved to temp: ${safeFilename}`);
+    this.logSuccess(`Saved to temp: ${safeFilename}`);
     return {
-      url: `/uploads/temp/${safeFilename}`,
+      url: this.publicUrl(`/uploads/temp/${safeFilename}`),
       filename: safeFilename,
       size: input.size,
       key: `uploads/temp/${safeFilename}`,
+      mimeType: input.mimeType,
     };
   }
 
   /**
-   * Moves a file from uploads/temp/ to its permanent uploads/{type}/ directory.
-   * Called by: UploadService.commitFile() after the DB record is committed.
+   * Promote a temp file to {UPLOAD_DEST}/{type}/{filename}.
    *
-   * Flow:
-   * 1. ensureDir(uploads/{type}/) — create the type subdirectory if absent.
-   * 2. Build source path: uploads/temp/{filename}.
-   * 3. Verify source exists; throw 404 ERR_FILE_NOT_FOUND if not.
-   * 4. fs.renameSync(oldPath, newPath) — atomic on same-volume rename.
-   * 5. Return StoredFile { url: '/uploads/{type}/{filename}', filename }.
+   * `tempIdentifier` is either:
+   *   - a flat filename (server-mediated upload — leaf of /uploads/temp/...), OR
+   *   - a full temp key like "uploads/temp/u-7/aadhar/abc.png" (presigned).
    *
-   * Note: fs.rename is atomic only when source and destination are on the same
-   * filesystem partition. For cross-partition or networked volumes, replace with
-   * a copy-then-unlink approach.
-   *
-   * @param filename - UUID filename returned by saveTemp().
-   * @param type     - Target category slug (e.g. 'avatar', 'document').
-   * @returns StoredFile with the permanent URL and filename.
-   * @throws 404 ERR_FILE_NOT_FOUND — temp file is missing or already committed.
+   * Both forms collapse to the same permanent destination using only the leaf
+   * filename, so a presigned aadhar upload at uploads/temp/u-7/aadhar/abc.png
+   * lands at uploads/aadhar/abc.png — exactly the layout server-mediated
+   * uploads produce.
    */
-  async commitToPermanent(filename: string, type: string): Promise<StoredFile> {
+  async commitToPermanent(tempIdentifier: string, type: string): Promise<StoredFile> {
     const safeType = this.safeSegment(type);
-    const safeFilename = path.basename(filename);
+    const safeFilename = path.basename(tempIdentifier);
     const typeDir = path.join(this.baseDir, safeType);
     this.ensureDir(typeDir);
 
-    const oldPath = path.join(this.tempDir, safeFilename);
+    const oldPath = this.isFullKey(tempIdentifier)
+      ? this.resolveManagedPath(tempIdentifier) // nested presigned key
+      : path.join(this.tempDir, safeFilename); // flat server-mediated filename
+
     const newPath = path.join(typeDir, safeFilename);
 
     if (!fs.existsSync(oldPath)) {
-      throw ApiError.fromDefinition(Errors.FILE_NOT_FOUND);
+      throw ApiError.fromDefinition(Errors.FILE_NOT_FOUND, {
+        details: `Temp file not found at ${path.relative(this.baseDir, oldPath)}.`,
+      });
     }
-
     const size = fs.statSync(oldPath).size;
     fs.renameSync(oldPath, newPath);
 
-    const permanentUrl = `/uploads/${safeType}/${safeFilename}`;
-    this.logger.log(`File committed to permanent storage: ${permanentUrl}`);
+    // Best-effort: prune now-empty parent directories under temp/ so cleanup
+    // doesn't accumulate leftover scaffolding (uploads/temp/u-7/aadhar/).
+    this.pruneEmptyParents(path.dirname(oldPath));
 
+    const url = this.publicUrl(`/uploads/${safeType}/${safeFilename}`);
+    this.logSuccess(`Committed: ${url}`);
     return {
-      url: permanentUrl,
+      url,
       filename: safeFilename,
       size,
       key: `uploads/${safeType}/${safeFilename}`,
     };
   }
 
-  /**
-   * Deletes a file from the local filesystem by its relative URL.
-   * Called by: UploadService.removeFile().
-   *
-   * Flow:
-   * 1. Guard: empty fileUrl → return false immediately.
-   * 2. Resolve relative URL to absolute path:
-   *    - Starts with '/' → path.join(cwd, fileUrl) (API-relative URL).
-   *    - Otherwise       → path.resolve(fileUrl)   (already absolute or CWD-relative).
-   * 3. fs.existsSync() — return false if already gone (idempotent, caller decides on 404).
-   * 4. fs.promises.unlink(filePath) — async delete.
-   * 5. Return true on success; return false on caught error (never throws).
-   *
-   * @param fileUrl - Relative URL (e.g. /uploads/temp/abc.webp).
-   * @returns true if deleted, false if file was not found or an error occurred.
-   */
   async delete(fileUrl: string): Promise<boolean> {
     try {
       if (!fileUrl) return false;
-
       const filePath = this.resolveManagedPath(fileUrl);
-
       if (!fs.existsSync(filePath)) return false;
-
       await fs.promises.unlink(filePath);
-      this.logger.log(`File deleted: ${filePath}`);
+      this.logSuccess(`Deleted: ${filePath}`);
       return true;
     } catch (error) {
-      this.logger.error(`Error deleting file "${fileUrl}": ${(error as Error).message}`);
+      this.logError('delete', error as Error);
       return false;
     }
   }
 
   /**
-   * Purges stale files from uploads/temp/ that exceed the age threshold.
-   * Called by: a scheduled CronJob / BullMQ recurring task (not yet wired).
-   *
-   * Flow:
-   * 1. fs.readdirSync(uploads/temp/) — list all filenames.
-   * 2. cutoff = now − olderThanHours × 3600 × 1000 ms.
-   * 3. For each file: stat() → if mtimeMs < cutoff, unlinkSync and increment counter.
-   * 4. Return the count of deleted files.
-   *
-   * Errors are caught and warned rather than thrown so a partial failure does not
-   * crash the recurring job or prevent subsequent cleanup runs.
-   *
-   * @param olderThanHours - Age threshold in hours (default: 24).
-   * @returns Number of files deleted.
+   * Recursive temp cleanup. Walks every file under {UPLOAD_DEST}/temp/ — both
+   * the flat layout produced by server-mediated saveTemp (uploads/temp/abc.png)
+   * AND the nested layout produced by presigned uploads
+   * (uploads/temp/{userId}/{type}/abc.png). After unlinking stale files, prunes
+   * any newly empty subdirectories so the temp tree doesn't accumulate
+   * scaffolding.
    */
   async cleanupTemp(olderThanHours = 24): Promise<number> {
     let deleted = 0;
     try {
-      const files = fs.readdirSync(this.tempDir);
-      const cutoff = Date.now() - olderThanHours * 60 * 60 * 1000;
-
-      for (const file of files) {
-        const filePath = path.join(this.tempDir, file);
-        const stat = fs.statSync(filePath);
-        if (stat.mtimeMs < cutoff) {
-          fs.unlinkSync(filePath);
-          deleted++;
-        }
-      }
-      this.logger.log(`Temp cleanup: deleted ${deleted} stale files`);
+      const cutoff = Date.now() - olderThanHours * 3600 * 1000;
+      deleted = this.cleanupTempRecursive(this.tempDir, cutoff);
+      this.logSuccess(`Temp cleanup: deleted ${deleted} stale files`);
     } catch (error) {
       this.logger.warn(`Temp cleanup error: ${(error as Error).message}`);
     }
     return deleted;
+  }
+
+  private cleanupTempRecursive(dir: string, cutoffMs: number): number {
+    let deleted = 0;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          deleted += this.cleanupTempRecursive(entryPath, cutoffMs);
+          // Drop the directory if it became empty after pruning.
+          try {
+            if (fs.readdirSync(entryPath).length === 0 && entryPath !== this.tempDir) {
+              fs.rmdirSync(entryPath);
+            }
+          } catch {
+            /* concurrent writer; leave it */
+          }
+        } else if (entry.isFile()) {
+          const stat = fs.statSync(entryPath);
+          if (stat.mtimeMs < cutoffMs) {
+            fs.unlinkSync(entryPath);
+            deleted++;
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Skipping ${entryPath} during cleanup: ${(err as Error).message}`,
+        );
+      }
+    }
+    return deleted;
+  }
+
+  async head(fileKey: string): Promise<ObjectHead> {
+    try {
+      const filePath = this.resolveManagedPath(fileKey);
+      if (!fs.existsSync(filePath)) return { exists: false, size: 0 };
+      const stat = fs.statSync(filePath);
+      return {
+        exists: true,
+        size: stat.size,
+        lastModified: stat.mtime,
+      };
+    } catch {
+      return { exists: false, size: 0 };
+    }
+  }
+
+  // ─── IPresignedUrlProvider ────────────────────────────────────────────────
+
+  async generateUploadUrl(
+    fileKey: string,
+    _uploadType: string,
+    options: Partial<PresignedUrlOptions> = {},
+  ): Promise<PresignedUrlResult> {
+    const expirySeconds =
+      options.expirySeconds ?? this.uploadConfig.getConfig().presignedUrlExpiry;
+    const method = (options.method ?? 'PUT') as 'PUT';
+
+    // If the signer service is wired, return a real signed URL pointing at
+    // PUT /upload/local/direct. Otherwise (rare — only in fixture builds) fall
+    // back to the legacy api-proxy descriptor so existing callers keep working.
+    if (this.signer) {
+      const { url, expireAt } = this.signer.signUrl({
+        method,
+        key: fileKey,
+        expireSeconds: expirySeconds,
+        contentType: options.contentType,
+        maxSizeBytes: options.maxSizeBytes,
+      });
+      return {
+        url: this.publicUrl(url),
+        method,
+        expiresAt: expireAt,
+        fileKey,
+        headers: options.contentType ? { 'Content-Type': options.contentType } : undefined,
+        providerData: {
+          provider: 'local',
+          mode: 'signed-url',
+          note:
+            'PUT the raw file body to this URL. The signature encodes key + expire + ' +
+            'contentType + maxSize; tampering with any of those invalidates the request.',
+        },
+      };
+    }
+
+    // Legacy fallback (no signer wired)
+    return {
+      url: `/upload/${_uploadType}`,
+      method: 'POST',
+      expiresAt: this.expiresAt(expirySeconds),
+      fileKey,
+      headers: { 'Content-Type': 'multipart/form-data' },
+      providerData: {
+        mode: 'api-proxy',
+        fieldName: 'file',
+        note: 'No signer wired; falling back to multipart API-proxy upload.',
+      },
+    };
+  }
+
+  async generateDownloadUrl(
+    fileKey: string,
+    options: Partial<PresignedUrlOptions> = {},
+  ): Promise<PresignedUrlResult> {
+    const expirySeconds =
+      options.expirySeconds ?? this.uploadConfig.getConfig().presignedUrlExpiry;
+
+    if (this.signer) {
+      const { url, expireAt } = this.signer.signUrl({
+        method: 'GET',
+        key: fileKey,
+        expireSeconds: expirySeconds,
+      });
+      return {
+        url: this.publicUrl(url),
+        method: 'GET',
+        expiresAt: expireAt,
+        fileKey,
+      };
+    }
+
+    // Legacy: return the static-file URL. Static serving in main.ts means the
+    // file is publicly addressable by anyone who knows the path; only safe for
+    // public types (e.g. avatar). For private types you MUST configure the
+    // signer (set UPLOAD_LOCAL_SIGNING_SECRET).
+    const url = fileKey.startsWith('/') ? fileKey : `/${fileKey}`;
+    return {
+      url: this.publicUrl(url),
+      method: 'GET',
+      expiresAt: this.expiresAt(expirySeconds),
+      fileKey,
+    };
+  }
+
+  async generateDeleteUrl(
+    fileKey: string,
+    options: Partial<PresignedUrlOptions> = {},
+  ): Promise<PresignedUrlResult> {
+    // We deliberately do NOT issue a signed DELETE. Local mode routes deletes
+    // through DELETE /upload/remove which already requires JWT auth. Exposing
+    // a signed-URL DELETE would let any URL holder destroy files.
+    const expirySeconds =
+      options.expirySeconds ?? this.uploadConfig.getConfig().presignedUrlExpiry;
+    return {
+      url: '/upload/remove',
+      method: 'DELETE',
+      expiresAt: this.expiresAt(expirySeconds),
+      fileKey,
+      providerData: {
+        mode: 'api-proxy',
+        body: { fileUrl: fileKey },
+        note: 'Local provider routes DELETE through the authenticated /upload/remove endpoint.',
+      },
+    };
+  }
+
+  async completePresignedUpload(input: PresignedCompleteInput): Promise<PresignedCompleteResult> {
+    const head = await this.head(input.fileKey);
+    if (!head.exists) {
+      throw ApiError.fromDefinition(Errors.FILE_NOT_FOUND, {
+        details:
+          'No file found at the provided key. Did the PUT against the signed URL succeed?',
+      });
+    }
+    if (input.expectedSize && Math.abs(head.size - input.expectedSize) > 1024) {
+      throw ApiError.fromDefinition(Errors.BAD_REQUEST, {
+        details: `Size mismatch: expected ${input.expectedSize}, found ${head.size}.`,
+      });
+    }
+    return {
+      exists: true,
+      size: head.size,
+      url: this.publicUrl(`/${input.fileKey.replace(/^\/+/, '')}`),
+      fileKey: input.fileKey,
+    };
+  }
+
+  // ─── Direct upload/download (called by LocalDirectUploadController) ───────
+
+  /**
+   * Land raw bytes at `key` under {UPLOAD_DEST}. The key must already be a
+   * temp-prefixed key (uploads/temp/...), enforced by `assertWritableKey()`.
+   */
+  async writeDirectUpload(
+    key: string,
+    buffer: Buffer,
+    expectedContentType?: string,
+  ): Promise<StoredFile> {
+    this.assertWritableKey(key);
+
+    const filePath = this.resolveManagedPath(key);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, buffer);
+
+    this.logSuccess(`Direct upload landed: ${filePath} (${buffer.length} bytes)`);
+    return {
+      url: this.publicUrl(`/${key.replace(/^\/+/, '')}`),
+      filename: path.basename(filePath),
+      size: buffer.length,
+      key,
+      mimeType: expectedContentType,
+    };
+  }
+
+  /**
+   * Resolve `key` (must live under baseDir) to an absolute path for streaming
+   * by the controller. Returns null if the file doesn't exist.
+   */
+  resolveDownloadPath(key: string): { absolutePath: string; size: number } | null {
+    let abs: string;
+    try {
+      abs = this.resolveManagedPath(key);
+    } catch {
+      return null;
+    }
+    if (!fs.existsSync(abs)) return null;
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) return null;
+    return { absolutePath: abs, size: stat.size };
+  }
+
+  // ─── Internals ────────────────────────────────────────────────────────────
+
+  private ensureDir(dir: string): void {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  }
+
+  /**
+   * Heuristic: a "full key" contains a path separator — that means it was
+   * produced by buildUploadKey (presigned flow). A bare leaf filename is the
+   * server-mediated form. Both forms are accepted by commitToPermanent().
+   */
+  private isFullKey(tempIdentifier: string): boolean {
+    const normalised = tempIdentifier.replace(/\\/g, '/');
+    return normalised.includes('/');
+  }
+
+  /**
+   * Walk upward from `dir` removing empty directories until we hit baseDir or
+   * a non-empty directory. Used after a presigned commit to clean up the
+   * userId/type scaffolding (uploads/temp/u-7/aadhar/) that's no longer needed.
+   */
+  private pruneEmptyParents(dir: string): void {
+    let current = path.resolve(dir);
+    while (current.startsWith(this.tempDir) && current !== this.tempDir) {
+      try {
+        if (fs.readdirSync(current).length > 0) return;
+        fs.rmdirSync(current);
+      } catch {
+        return; // directory busy or already gone — stop
+      }
+      current = path.dirname(current);
+    }
   }
 
   private resolveManagedPath(fileUrl: string): string {
@@ -216,15 +427,34 @@ export class LocalStorageProvider implements IStorageProvider {
       ? normalizedUrl.slice('uploads/'.length)
       : normalizedUrl;
     const resolved = path.resolve(this.baseDir, withoutUploadsPrefix);
-
     if (!resolved.startsWith(this.baseDir)) {
       throw ApiError.fromDefinition(Errors.FILE_NOT_FOUND);
     }
-
     return resolved;
   }
 
-  private safeSegment(value: string): string {
-    return value.replace(/[^a-zA-Z0-9_-]/g, '');
+  /**
+   * Refuse to land a direct upload anywhere except uploads/temp/. The two-stage
+   * commit semantics depend on direct uploads always staging in temp/ first;
+   * letting a signed URL write straight into uploads/avatar/ would bypass the
+   * `commit` audit trail and the temp-cleanup safety net.
+   */
+  private assertWritableKey(key: string): void {
+    const normalised = key.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+    if (!normalised.startsWith('uploads/temp/')) {
+      throw ApiError.fromDefinition(Errors.FORBIDDEN, {
+        details: 'Direct uploads may only target keys under uploads/temp/.',
+      });
+    }
+  }
+
+  private publicUrl(relativeUrl: string): string {
+    const base = this.uploadConfig.getConfig().publicBaseUrl;
+    if (!base) return relativeUrl;
+    return `${base.replace(/\/+$/, '')}${relativeUrl}`;
+  }
+
+  private expiresAt(expirySeconds: number): number {
+    return Math.floor((Date.now() + expirySeconds * 1000) / 1000);
   }
 }

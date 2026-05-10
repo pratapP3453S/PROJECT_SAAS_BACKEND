@@ -119,19 +119,30 @@ export class UploadService {
     }
   }
 
+  /**
+   * Promote a temp file to its permanent location.
+   *
+   * `tempIdentifier` may be either:
+   *  - a flat filename (server-mediated upload — leaf of the tempUrl), or
+   *  - a full temp key like "uploads/temp/u-7/aadhar/abc.png" (presigned upload).
+   *
+   * The active storage provider detects the form and resolves the source object
+   * accordingly. Both forms commit to the same permanent shape:
+   *   {permanentPrefix}/{type}/{filename}.
+   */
   async commitFile(
-    filename: string,
+    tempIdentifier: string,
     type: string,
     context: UploadContext = {},
   ): Promise<MoveFileResult> {
     const startedAt = Date.now();
     const auditEntry = this.createAuditEntry(FileOperationType.COMMIT, type, context, {
-      fileName: filename,
+      fileName: tempIdentifier,
     });
 
     try {
       this.uploadConfig.getFileTypeConfig(type);
-      const stored = await this.storageProvider.commitToPermanent(filename, type);
+      const stored = await this.storageProvider.commitToPermanent(tempIdentifier, type);
 
       auditEntry.status = 'success';
       auditEntry.fileKey = stored.url;

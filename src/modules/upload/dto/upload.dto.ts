@@ -1,47 +1,71 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import {
+  IsIn,
+  IsNotEmpty,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsString,
+  Min,
+} from 'class-validator';
 
 /**
- * RemoveFileDto — request body for DELETE /upload/remove.
- *
- * fileUrl is the relative URL (e.g. /uploads/temp/abc.webp or
- * /uploads/avatar/abc.webp) returned by the upload or commit endpoints.
- * UploadService passes this directly to IStorageProvider.delete().
+ * RemoveFileDto — POST body for DELETE /upload/remove.
+ * fileUrl is the full URL or relative URL returned by /upload/:type or /commit
+ * — the active provider's delete() handles both shapes.
  */
 export class RemoveFileDto {
-  @ApiProperty({ description: 'Relative URL of the file to remove (e.g. /uploads/temp/abc.webp)' })
+  @ApiProperty({
+    description:
+      'URL of the file to remove (e.g. /uploads/temp/abc.webp or https://cdn.example.com/...)',
+  })
   @IsString()
   @IsNotEmpty()
   fileUrl: string;
 }
 
 /**
- * CommitFileDto — request body for POST /upload/commit.
+ * CommitFileDto — POST body for POST /upload/commit.
  *
- * Carries the server-assigned filename returned by POST /upload/:type and the
- * target type/category that determines the permanent storage directory.
+ * Two valid shapes, depending on which upload flow produced the temp file:
  *
- * Flow: caller receives UploadResult.serverFileName from the upload endpoint,
- * saves a DB record with the tempUrl, then calls POST /upload/commit to promote
- * the file to permanent storage and update the DB record with permanentUrl.
+ *  ┌─────────────────────────┬──────────────────────────────────────────┐
+ *  │ Server-mediated upload  │ { filename, type }                       │
+ *  │ (POST /upload/:type)    │ filename = leaf returned in tempUrl      │
+ *  ├─────────────────────────┼──────────────────────────────────────────┤
+ *  │ Presigned upload        │ { fileKey, type }                        │
+ *  │ (PUT /upload/local/...) │ fileKey  = full key from /presigned-url  │
+ *  │ (PUT s3 signed URL)     │            and /presigned-url/complete    │
+ *  └─────────────────────────┴──────────────────────────────────────────┘
  *
- * Fields:
- *  filename : UUID-based name with .webp extension (e.g. 'abc-123.webp').
- *             Must match the filename returned by the upload endpoint.
- *  type     : Target subdirectory slug (e.g. 'avatar', 'document', 'aadhar').
- *             Determines the permanent storage path or S3 prefix.
+ * `fileKey` takes precedence when both are provided. The active provider
+ * detects which form it received (a key contains '/', a flat filename does not)
+ * and resolves the temp object accordingly.
  */
 export class CommitFileDto {
-  @ApiProperty({
-    description: 'Server filename returned by the upload endpoint (e.g. abc-123.webp)',
+  @ApiPropertyOptional({
+    description:
+      'Leaf server filename returned by POST /upload/:type (server-mediated flow). ' +
+      'Required if `fileKey` is omitted.',
     example: 'f47ac10b-58cc-4372-a567-0e02b2c3d479.webp',
   })
   @IsString()
-  @IsNotEmpty()
-  filename: string;
+  @IsOptional()
+  filename?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Full temp key returned by POST /upload/presigned-url (presigned flow). ' +
+      'Required if `filename` is omitted. Example: ' +
+      '"uploads/temp/u-7/aadhar/abc.png".',
+    example: 'uploads/temp/u-7/aadhar/f47ac10b.png',
+  })
+  @IsString()
+  @IsOptional()
+  fileKey?: string;
 
   @ApiProperty({
-    description: 'Target type/category for permanent storage (e.g. avatar, document, aadhar)',
+    description: 'Target category for permanent storage',
     example: 'avatar',
   })
   @IsString()
@@ -49,63 +73,77 @@ export class CommitFileDto {
   type: string;
 }
 
-/**
- * MoveFileDto — legacy alias for CommitFileDto.
- * Kept for backwards compatibility with any existing callers.
- * New code should use CommitFileDto.
- *
- * @deprecated Use CommitFileDto instead.
- */
+/** @deprecated kept for backward compatibility with previous callers. */
 export class MoveFileDto {
-  @ApiPropertyOptional({ description: 'Server filename to move' })
-  @IsString()
-  filename: string;
-
-  @ApiPropertyOptional({ description: 'Target type/directory' })
-  @IsString()
-  @IsOptional()
-  type?: string;
+  @ApiPropertyOptional() @IsString() filename: string;
+  @ApiPropertyOptional() @IsString() @IsOptional() type?: string;
 }
 
 export class PresignedUploadUrlDto {
-  @ApiProperty({
-    description: 'Upload type/category that determines validation and storage rules',
-    example: 'avatar',
-  })
+  @ApiProperty({ description: 'Upload type/category', example: 'avatar' })
   @IsString()
   @IsNotEmpty()
   type: string;
 
-  @ApiProperty({
-    description: 'Original client filename',
-    example: 'profile.png',
-  })
+  @ApiProperty({ description: 'Original client filename', example: 'profile.png' })
   @IsString()
   @IsNotEmpty()
   filename: string;
 
-  @ApiProperty({
-    description: 'MIME type the client will upload',
-    example: 'image/png',
-  })
+  @ApiProperty({ description: 'MIME type the client will upload', example: 'image/png' })
   @IsString()
   @IsNotEmpty()
   contentType: string;
 
-  @ApiPropertyOptional({
-    description: 'Expected file size in bytes',
-    example: 524288,
-  })
+  @ApiPropertyOptional({ description: 'Expected file size in bytes', example: 524288 })
   @IsNumber()
   @Min(1)
   @IsOptional()
   size?: number;
 
-  @ApiPropertyOptional({
-    description: 'HTTP method requested for the signed URL',
-    example: 'PUT',
-  })
+  @ApiPropertyOptional({ description: 'HTTP method requested', example: 'PUT' })
   @IsIn(['PUT', 'POST'])
   @IsOptional()
   method?: 'PUT' | 'POST';
+}
+
+/**
+ * Body for POST /upload/presigned-url/complete.
+ * Sent AFTER the client has uploaded directly to the storage URL returned by
+ * /upload/presigned-url. The server verifies the object actually exists.
+ */
+export class CompletePresignedUploadDto {
+  @ApiProperty({ description: 'Object key returned by /upload/presigned-url' })
+  @IsString()
+  @IsNotEmpty()
+  fileKey: string;
+
+  @ApiProperty({ description: 'Upload type/category', example: 'avatar' })
+  @IsString()
+  @IsNotEmpty()
+  type: string;
+
+  @ApiPropertyOptional({ description: 'Size the client believes it uploaded' })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  size?: number;
+
+  @ApiPropertyOptional({ description: 'Provider-specific receipt (Cloudinary public_id, etc.)' })
+  @IsObject()
+  @IsOptional()
+  providerReceipt?: Record<string, unknown>;
+}
+
+export class GenerateDownloadUrlDto {
+  @ApiProperty({ description: 'Object key or relative path of the file' })
+  @IsString()
+  @IsNotEmpty()
+  fileKey: string;
+
+  @ApiPropertyOptional({ description: 'Custom expiry in seconds (overrides default)' })
+  @IsNumber()
+  @Min(60)
+  @IsOptional()
+  expirySeconds?: number;
 }

@@ -13,6 +13,8 @@ import { RolesGuard } from './common/guards/roles.guard';
 import { IdempotencyInterceptor } from './common/interceptors/idempotency.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { LoggerMiddleware } from './common/middleware/logger.middleware';
+import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
+import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { SanitizeMiddleware } from './common/middleware/sanitize.middleware';
 import { PrismaModule } from './database/prisma/prisma.module';
 import { JobsModule } from './jobs/jobs.module';
@@ -90,7 +92,7 @@ const envFilePath = process.env.ENV_FILE
     // ─── Feature Modules ─────────────────────────────────────────────────
     AuthModule,
     UserModule,
-    UploadModule,
+    UploadModule.forRoot(),
     HealthModule,
   ],
 
@@ -116,6 +118,12 @@ const envFilePath = process.env.ENV_FILE
     },
 
     // ─── Global Interceptors ──────────────────────────────────────────────
+    // Order matters: ResponseInterceptor wraps return values & stamps the
+    // diagnostic envelope — must run AFTER LoggingInterceptor so the logger
+    // sees the final timing snapshot, but BEFORE the response is serialised.
+    // Nest runs interceptors top-down for `intercept` and bottom-up for the
+    // mapped result, so listing ResponseInterceptor LAST means it gets to
+    // touch the envelope just before send.
     {
       provide: APP_INTERCEPTOR,
       useClass: IdempotencyInterceptor,
@@ -124,12 +132,20 @@ const envFilePath = process.env.ENV_FILE
       provide: APP_INTERCEPTOR,
       useClass: LoggingInterceptor,
     },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ResponseInterceptor,
+    },
   ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
+    // RequestContextMiddleware MUST run first so all downstream middleware,
+    // guards, interceptors, controllers, repositories, and cache calls share
+    // the same AsyncLocalStorage scope. Without this, RequestContext.current()
+    // returns undefined and the diagnostic envelope falls back to thin meta.
     consumer
-      .apply(LoggerMiddleware, SanitizeMiddleware)
+      .apply(RequestContextMiddleware, LoggerMiddleware, SanitizeMiddleware)
       .forRoutes({ path: '*', method: RequestMethod.ALL });
   }
 }
