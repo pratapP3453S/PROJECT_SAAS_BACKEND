@@ -20,8 +20,8 @@ import xss from 'xss';
  * that are not explicitly allowed.
  *
  * Used by:
- *  SanitizeMiddleware : src/common/middleware/sanitize.middleware.ts (req body/query/params)
- *  UserService        : src/modules/user/user.service.ts (toPublicProfile)
+ *  SanitizeMiddleware : src/core/middleware/sanitize.middleware.ts (req body/query/params)
+ *  UserService        : src/modules/user/application/use-cases/user.service.ts (toPublicProfile)
  */
 
 export function sanitizeString(input: string): string {

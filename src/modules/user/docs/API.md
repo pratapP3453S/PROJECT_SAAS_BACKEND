@@ -18,7 +18,7 @@ This document outlines the endpoints available in the **User Module**. For globa
 
 Retrieve the currently authenticated user's profile.
 
-**Endpoint:** `GET /users/me`
+**Endpoint:** `GET /api/v1/users/me`
 
 ### Headers
 | Header | Required | Description |
@@ -83,7 +83,7 @@ would show `dbMs > 0` and `cacheMisses: 1`.
 
 Update the currently authenticated user's own profile fields.
 
-**Endpoint:** `PATCH /users/me`
+**Endpoint:** `PATCH /api/v1/users/me`
 
 ### Headers
 | Header | Required | Description |
@@ -120,7 +120,7 @@ Returns the updated user profile representing the fields that were successfully 
 
 List all non-deleted users with pagination, sorting, and search capabilities.
 
-**Endpoint:** `GET /users`
+**Endpoint:** `GET /api/v1/users`
 
 ### Headers
 | Header | Required | Description |
@@ -164,7 +164,7 @@ List all non-deleted users with pagination, sorting, and search capabilities.
 
 Retrieve any specific target user's public profile by UUID.
 
-**Endpoint:** `GET /users/:id`
+**Endpoint:** `GET /api/v1/users/:id`
 
 ### Headers
 | Header | Required | Description |
@@ -183,7 +183,7 @@ Returns the targeted user profile.
 
 Update any target user's profile by UUID.
 
-**Endpoint:** `PATCH /users/:id`
+**Endpoint:** `PATCH /api/v1/users/:id`
 
 ### Headers
 | Header | Required | Description |
@@ -212,7 +212,7 @@ Returns the updated target user profile.
 
 Soft-delete a user by UUID. The record is retained in the database (`deletedAt` is set). Soft-deleted users cannot log in and are excluded from all active list queries.
 
-**Endpoint:** `DELETE /users/:id`
+**Endpoint:** `DELETE /api/v1/users/:id`
 
 ### Headers
 | Header | Required | Description |

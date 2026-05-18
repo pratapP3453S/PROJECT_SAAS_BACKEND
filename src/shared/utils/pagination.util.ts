@@ -1,4 +1,4 @@
-import { PaginationMeta } from '../../common/responses/api.response';
+import { PaginationMeta } from '../responses/api.response';
 
 /**
  * pagination.util — pure pagination helper functions.

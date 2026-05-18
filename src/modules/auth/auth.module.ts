@@ -1,56 +1,23 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { JwtModule } from '@nestjs/jwt';
-import { PassportModule } from '@nestjs/passport';
-import { AuthController } from './auth.controller';
-import { AuthRepository } from './auth.repository';
-import { AuthService } from './auth.service';
-import { JwtStrategy } from './strategies/jwt.strategy';
+import { AuthV1Module } from './api/v1/auth-v1.module';
 
 /**
- * AuthModule — feature module for all authentication flows.
+ * AuthModule — feature aggregator for authentication flows.
  *
- * Responsibility: Wires the auth Controller → Service → Repository layer and
- * configures Passport + JWT for the access token strategy.
+ * Composes the versioned API submodules and re-exports the things downstream
+ * features need (auth providers like JwtModule).
  *
- * Imports:
- *  PassportModule.register({ defaultStrategy: 'jwt' }) : sets 'jwt' as the
- *    default strategy so AuthGuard() can be used without specifying 'jwt' explicitly.
- *  JwtModule.registerAsync : loads jwt.secret and jwt.expiresIn from ConfigService
- *    so JwtService.signAsync() in AuthService can sign tokens without extra config.
+ * Layout under modules/auth/
+ *  - domain/         entity types (AuthTokens, PublicUser, …)
+ *  - infrastructure/ Prisma repository + JWT/Passport strategy
+ *  - application/    AuthService — use-case orchestration
+ *  - api/v1/         AuthController + request DTOs + AuthV1Module
+ *  - auth.module.ts  this file (composition root)
  *
- * Providers:
- *  AuthService    : business logic (register, login, refresh, logout).
- *  AuthRepository : Prisma data access for the users table (auth-specific methods).
- *  JwtStrategy    : Passport strategy that validates Bearer tokens on each request.
- *
- * Exports:
- *  AuthService   : re-exported in case other modules need auth helpers.
- *  JwtModule     : re-exported so other modules can inject JwtService.
- *  PassportModule: re-exported for guard compatibility.
- *
- * Used by: AppModule → imports: [..., AuthModule]
- * See also:
- *  AuthController  → src/modules/auth/auth.controller.ts
- *  JwtStrategy     → src/modules/auth/strategies/jwt.strategy.ts
- *  JwtAuthGuard    → src/common/guards/jwt-auth.guard.ts
+ * Imported by: AppModule
  */
 @Module({
-  imports: [
-    PassportModule.register({ defaultStrategy: 'jwt' }),
-    JwtModule.registerAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        secret: configService.get<string>('jwt.secret'),
-        signOptions: {
-          expiresIn: configService.get<string>('jwt.expiresIn', '7d'),
-        },
-      }),
-    }),
-  ],
-  controllers: [AuthController],
-  providers: [AuthService, AuthRepository, JwtStrategy],
-  exports: [AuthService, JwtModule, PassportModule],
+  imports: [AuthV1Module],
+  exports: [AuthV1Module],
 })
 export class AuthModule {}

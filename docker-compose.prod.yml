@@ -62,3 +62,7 @@ services:
         limits:
           cpus: "0.5"
           memory: 256M
+
+volumes:
+  uploads_data:
+    name: ${UPLOADS_VOLUME_NAME:-uploads_data_prod}

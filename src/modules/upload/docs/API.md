@@ -15,8 +15,8 @@ The upload feature supports two flows:
 
 | Flow | When to use |
 |---|---|
-| **Server-mediated** (`POST /upload/:type` → `/commit`) | The server must process the file (resize, encrypt, validate magic bytes). Works for every backend, including local. |
-| **Direct to storage** (`POST /upload/presigned-url` → client uploads → `/presigned-url/complete`) | The client uploads the bytes directly to S3 / R2 / Cloudinary / ImageKit. The server never sees the bytes. Best for large files and high throughput. |
+| **Server-mediated** (`POST /api/v1/upload/:type` → `/commit`) | The server must process the file (resize, encrypt, validate magic bytes). Works for every backend, including local. |
+| **Direct to storage** (`POST /api/v1/upload/presigned-url` → client uploads → `/presigned-url/complete`) | The client uploads the bytes directly to S3 / R2 / Cloudinary / ImageKit. The server never sees the bytes. Best for large files and high throughput. |
 
 Both flows end with a row in your DB pointing at the file's **permanent URL**.
 
@@ -24,23 +24,23 @@ Both flows end with a row in your DB pointing at the file's **permanent URL**.
 
 ## 1. Server-mediated upload — Stage 1
 
-`POST /upload/:type` (multipart/form-data)
+`POST /api/v1/upload/:type` (multipart/form-data)
 
-Path: `:type` ∈ `avatar | document | aadhar | identity | passport`.
+Path: `:type` ∈ `avatar | image | video | audio | document | spreadsheet | presentation | archive | aadhar | identity | passport`.
 
 ### Constraints
 - Field name: `file`
-- Max size: `MAX_FILE_SIZE_MB` (default 10 MB; enforced by both Multer and `FileValidatorService`).
-- Allowed types: per `UploadConfigService` registry. Avatar/Aadhar/Identity/Passport accept only `image/jpeg`, `image/png`, `image/webp`. Document accepts `application/pdf`, `application/msword`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`.
-- Image processing: per type. Avatar → 512×512 WebP @85; sensitive types → 1024×1024 WebP @90.
-- Encryption: sensitive types are AES-256-CBC encrypted before storage.
+- Max size: global ceiling is `MAX_FILE_SIZE_MB` (default 10 MB; enforced by Multer). Per-category overrides apply — see [the README](./README.md#file-type-registry-production-ready) for the matrix (e.g. `video` = 500 MB, `archive` = 100 MB, `avatar` = 5 MB).
+- Allowed types: per `UploadConfigService.loadFileTypeRegistry()`. Images, videos, audio, docs, spreadsheets, presentations, archives, and KYC categories each have a tailored MIME allow-list.
+- Image processing: only applied to `avatar`, `image`, and KYC categories. `video`, `audio`, `document`, `spreadsheet`, `presentation`, and `archive` pass through bit-for-bit.
+- Encryption: `document`, `spreadsheet`, `presentation`, `archive`, `aadhar`, `identity`, and `passport` are AES-256-CBC encrypted before storage.
 
 ### Response 201 — full envelope (canonical shape)
 ```json
 {
   "success": true,
   "statusCode": 201,
-  "message": "File uploaded successfully. Use POST /upload/commit to promote to permanent storage.",
+  "message": "File uploaded successfully. Use POST /api/v1/upload/commit to promote to permanent storage.",
   "data": {
     "tempUrl": "/uploads/temp/abc.webp",
     "serverFileName": "abc.webp",
@@ -85,18 +85,18 @@ Errors: `400 ERR_FILE_NOT_UPLOADED`, `413 ERR_FILE_TOO_LARGE`, `415 ERR_INVALID_
 
 ## 2. Commit — Stage 2
 
-`POST /upload/commit`
+`POST /api/v1/upload/commit`
 
 Promotes a temp file to its permanent location for the type. Accepts **either**
 shape depending on which upload flow produced the temp file:
 
 ```json
-// Server-mediated commit (after POST /upload/:type)
+// Server-mediated commit (after POST /api/v1/upload/:type)
 { "filename": "abc.webp", "type": "avatar" }
 ```
 
 ```json
-// Presigned commit (after POST /upload/presigned-url + PUT + /complete)
+// Presigned commit (after POST /api/v1/upload/presigned-url + PUT + /complete)
 { "fileKey": "uploads/temp/u-7/aadhar/abc.png", "type": "aadhar" }
 ```
 
@@ -126,7 +126,7 @@ Errors: `400 ERR_BAD_REQUEST` (neither field provided), `404 ERR_FILE_NOT_FOUND`
 
 ## 3. Delete
 
-`DELETE /upload/remove`
+`DELETE /api/v1/upload/remove`
 
 Idempotent — returns `404` if the file is already gone.
 
@@ -143,7 +143,7 @@ Response 200
 
 ## 4. Presigned upload URL — Direct flow Stage 1
 
-`POST /upload/presigned-url` → returns a provider-specific URL the browser PUTs/POSTs to.
+`POST /api/v1/upload/presigned-url` → returns a provider-specific URL the browser PUTs/POSTs to.
 
 ```json
 { "type": "avatar", "filename": "profile.png", "contentType": "image/png", "size": 524288, "method": "PUT" }
@@ -243,7 +243,7 @@ await fetch(data.url, { method: 'POST', body: fd });
 
 ## 5. Complete presigned upload — Direct flow Stage 2 (REQUIRED)
 
-`POST /upload/presigned-url/complete`
+`POST /api/v1/upload/presigned-url/complete`
 
 The server stats the object on the storage backend to confirm the upload arrived.
 **Skip this and a malicious client can persist URLs that don't exist in storage.**
@@ -268,7 +268,7 @@ Response 200
 
 Errors: `404 ERR_FILE_NOT_FOUND` (no object at the key), `400 ERR_BAD_REQUEST` (size mismatch beyond tolerance).
 
-After this, call `POST /upload/commit { fileKey, type }` (passing the
+After this, call `POST /api/v1/upload/commit { fileKey, type }` (passing the
 `fileKey` echoed in the response above) to promote the temp object to its
 permanent `{type}/` location on the same backend. So a presigned `aadhar`
 upload at `uploads/temp/u-7/aadhar/abc.png` ends up at `uploads/aadhar/abc.png`
@@ -278,7 +278,7 @@ upload at `uploads/temp/u-7/aadhar/abc.png` ends up at `uploads/aadhar/abc.png`
 
 ## 6. Signed download URL
 
-`POST /upload/download-url`
+`POST /api/v1/upload/download-url`
 
 Returns a time-limited URL the browser can fetch directly. Use for private
 types (`document`, `aadhar`, `identity`, `passport`) so the API never streams
@@ -297,7 +297,7 @@ Response 200 — provider-specific signed URL valid for `expirySeconds` seconds.
 ## 7. Local direct upload (HMAC-signed) — `PUT /upload/local/direct`
 
 Mounted only when `UPLOAD_PROVIDER=local`. The server issues this URL via
-`POST /upload/presigned-url`; clients then PUT raw bytes against it. **No
+`POST /api/v1/upload/presigned-url`; clients then PUT raw bytes against it. **No
 `Authorization: Bearer` header is needed** — the URL signature is the authorisation.
 
 | Query param | Required | Description |
@@ -362,19 +362,19 @@ JSON error envelope (since they're thrown before the stream starts).
 
 ### Server-mediated avatar update
 ```
-POST /upload/avatar           → tempUrl
-PATCH /users/me {avatarUrl: tempUrl}        # write tempUrl to user row
-POST /upload/commit {filename, type}        → permanentUrl
-PATCH /users/me {avatarUrl: permanentUrl}   # swap to permanent
+POST /api/v1/upload/avatar           → tempUrl
+PATCH /api/v1/users/me {avatarUrl: tempUrl}        # write tempUrl to user row
+POST /api/v1/upload/commit {filename, type}        → permanentUrl
+PATCH /api/v1/users/me {avatarUrl: permanentUrl}   # swap to permanent
 ```
 
 ### Direct-to-S3 avatar update
 ```
-POST /upload/presigned-url {type:'avatar', filename, contentType}     → {url, fileKey, headers, expiresAt}
+POST /api/v1/upload/presigned-url {type:'avatar', filename, contentType}     → {url, fileKey, headers, expiresAt}
 PUT  {url} (browser)                                                  → 200 (bytes go to S3)
-POST /upload/presigned-url/complete {fileKey, type:'avatar', size}    → {url, fileKey, exists, size}
-POST /upload/commit {fileKey, type:'avatar'}                          → {permanentUrl, serverFileName}
-PATCH /users/me {avatarUrl: permanentUrl}                             # write permanent URL
+POST /api/v1/upload/presigned-url/complete {fileKey, type:'avatar', size}    → {url, fileKey, exists, size}
+POST /api/v1/upload/commit {fileKey, type:'avatar'}                          → {permanentUrl, serverFileName}
+PATCH /api/v1/users/me {avatarUrl: permanentUrl}                             # write permanent URL
 ```
 
 The two-step `complete` + `commit` exists for the same reason it does in the
@@ -386,7 +386,7 @@ the temp URL — but be aware the temp-cleanup cron will delete it after
 
 ### Local-direct presigned aadhar upload (UPLOAD_PROVIDER=local)
 ```
-POST /upload/presigned-url {type:'aadhar', filename:'image.png', contentType:'image/png', size:524288}
+POST /api/v1/upload/presigned-url {type:'aadhar', filename:'image.png', contentType:'image/png', size:524288}
   → {url:'/upload/local/direct?key=uploads/temp/u-7/aadhar/abc.png&expire=...&ct=image/png&max=524288&sig=...',
      method:'PUT', headers:{Content-Type:'image/png'},
      fileKey:'uploads/temp/u-7/aadhar/abc.png', expiresAt}
@@ -395,10 +395,10 @@ PUT  {url}  Content-Type: image/png  body: <raw bytes>
   → file lands at uploads/temp/u-7/aadhar/abc.png
   → 200 {url, fileKey, size, next:{endpoint:'/upload/presigned-url/complete', body:{fileKey}}}
 
-POST /upload/presigned-url/complete {fileKey:'uploads/temp/u-7/aadhar/abc.png', type:'aadhar', size:524288}
+POST /api/v1/upload/presigned-url/complete {fileKey:'uploads/temp/u-7/aadhar/abc.png', type:'aadhar', size:524288}
   → 200 {exists:true, size, url, fileKey:'uploads/temp/u-7/aadhar/abc.png'}
 
-POST /upload/commit {fileKey:'uploads/temp/u-7/aadhar/abc.png', type:'aadhar'}
+POST /api/v1/upload/commit {fileKey:'uploads/temp/u-7/aadhar/abc.png', type:'aadhar'}
   → file moves to uploads/aadhar/abc.png  ← the question Part 1 of this doc set asked
   → 200 {permanentUrl:'/uploads/aadhar/abc.png', serverFileName:'abc.png'}
 ```

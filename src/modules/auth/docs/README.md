@@ -2,16 +2,42 @@
 
 ## Purpose
 
-The auth module owns account registration, login, refresh-token rotation, logout, and access-token validation. It should remain focused on authentication and session lifecycle only. Profile reads and admin user management belong in `src/modules/user`.
+The auth module owns account registration, login, refresh-token rotation,
+logout, and access-token validation. It should remain focused on
+authentication and session lifecycle only. Profile reads and admin user
+management belong in [src/modules/user](../../user/).
 
-## Request Flow
+## Layer map
+
+```
+modules/auth/
+├── domain/
+│   └── entities/auth.entity.ts          # AuthTokens, AuthResponse, PublicUser, toPublicUser()
+├── infrastructure/
+│   ├── prisma/auth.repository.ts        # extends BaseRepository<User>
+│   └── jwt/jwt.strategy.ts              # PassportStrategy for Bearer-token verification
+├── application/
+│   └── use-cases/auth.service.ts        # register / login / refresh / logout
+├── api/
+│   └── v1/
+│       ├── controllers/auth.controller.ts
+│       ├── dto/login.dto.ts             # LoginDto, RefreshTokenDto, future flows
+│       ├── dto/register.dto.ts
+│       └── auth-v1.module.ts            # wires JwtModule + PassportModule + providers
+└── auth.module.ts                       # aggregator (re-exports AuthV1Module)
+```
+
+## Routes (v1)
+
+All routes are URI-versioned through `@Controller({ path: 'auth', version: '1' })`,
+producing `/api/v1/auth/...`.
 
 ### Register
 
-`POST /auth/register`
+`POST /api/v1/auth/register`
 
 1. `AuthController.register()` receives `RegisterDto`.
-2. The global validation pipe validates email, password, and profile fields.
+2. The global `AppValidationPipe` validates email, password, and profile fields.
 3. `AuthService.register()` lowercases the email and checks uniqueness through `AuthRepository.findByEmail()`.
 4. The password is hashed with `bcryptjs` using `APP_CONSTANTS.BCRYPT_ROUNDS`.
 5. `AuthRepository.create()` creates the user row.
@@ -22,7 +48,7 @@ The auth module owns account registration, login, refresh-token rotation, logout
 
 ### Login
 
-`POST /auth/login`
+`POST /api/v1/auth/login`
 
 1. `AuthController.login()` receives `LoginDto`.
 2. `AuthService.login()` loads the user by lowercase email.
@@ -34,7 +60,7 @@ The auth module owns account registration, login, refresh-token rotation, logout
 
 ### Refresh
 
-`POST /auth/refresh`
+`POST /api/v1/auth/refresh`
 
 1. `AuthController.refreshTokens()` decodes the refresh token payload only to extract `sub`.
 2. `AuthService.refreshTokens()` loads the user by id.
@@ -42,26 +68,16 @@ The auth module owns account registration, login, refresh-token rotation, logout
 4. A new access and refresh token pair is issued.
 5. The stored refresh token hash is overwritten, completing token rotation.
 
-Important: the controller decode step is not trust. The security check is the bcrypt comparison against the stored hash.
+The controller decode step is not trust. The security check is the bcrypt comparison against the stored hash.
 
 ### Logout
 
-`POST /auth/logout`
+`POST /api/v1/auth/logout`
 
 1. `JwtAuthGuard` validates the access token and populates `req.user`.
 2. `AuthController.logout()` extracts the current user.
 3. `AuthService.logout()` sets `users.refresh_token` to `NULL`.
 4. Existing access tokens remain valid until expiry; the client must discard them.
-
-## Key Files
-
-- `auth.controller.ts`: route definitions and response envelope mapping.
-- `auth.service.ts`: credential checks, token signing, refresh-token rotation, logout.
-- `auth.repository.ts`: auth-specific user data access.
-- `strategies/jwt.strategy.ts`: Passport JWT access-token validation and live user lookup.
-- `dto/register.dto.ts`: registration validation contract.
-- `dto/login.dto.ts`: login and refresh validation contracts.
-- `interfaces/auth.interface.ts`: public response shapes and user sanitization.
 
 ## Dependencies
 
@@ -79,7 +95,7 @@ The module writes to the `User` model:
 - `email`, `password`, `firstName`, `lastName`, `phone` during registration.
 - `refreshToken` during register, login, refresh, and logout.
 - `lastLoginAt` during register and login.
-- password-reset and email-verification repository methods exist for future flows but are not exposed by the controller yet.
+- Password-reset and email-verification repository methods exist for future flows but are not exposed by the controller yet.
 
 ## Complexity And Risk
 
@@ -92,9 +108,16 @@ The module writes to the `User` model:
 
 ## Adding A New Auth Flow
 
-1. Add DTOs in `dto/`.
-2. Add service logic in `AuthService`; keep controller code thin.
-3. Add repository methods only when the query is auth-specific.
-4. Add response and error definitions in `src/common/constants`.
-5. Update this guide with the new route flow, dependencies, and security notes.
+1. Add request DTOs in `api/v1/dto/`.
+2. Add service logic in `application/use-cases/auth.service.ts`; keep the controller thin.
+3. Add repository methods to `infrastructure/prisma/auth.repository.ts` only when the query is auth-specific.
+4. Add response and error definitions in [shared/constants](../../../shared/constants/).
+5. Update this guide and `docs/API.md` with the new route flow, dependencies, and security notes.
 
+## Adding A v2
+
+1. Copy `api/v1/` to `api/v2/`.
+2. Change every `@Controller({ ..., version: '1' })` to `version: '2'`.
+3. Adjust DTOs/serializers as needed for the breaking changes.
+4. Write `api/v2/auth-v2.module.ts` mirroring `auth-v1.module.ts`.
+5. Import both submodules from `auth.module.ts`. v1 continues to serve existing clients.

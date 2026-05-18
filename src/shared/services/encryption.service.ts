@@ -27,7 +27,6 @@ import {
  *
  * Used by: UploadService (encrypts sensitive file types before writing to disk).
  * See also: encryption.util.ts → src/shared/utils/encryption.util.ts
- *           isSensitiveType()  → src/modules/upload/interfaces/upload.interface.ts
  */
 @Injectable()
 export class EncryptionService {

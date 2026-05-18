@@ -2,55 +2,79 @@
 
 ## Purpose
 
-`src/shared` contains global reusable services and pure utilities that are useful across feature modules. It is imported once by `AppModule` and marked `@Global()`.
+`src/shared/` is the pure-utility layer. Everything here can be imported by
+`core/` AND by feature modules without creating circular dependencies. Nothing
+in `shared/` depends on NestJS DI, the database, the cache, or the network —
+they're plain TypeScript modules.
 
-## Services
+Rule of thumb — if removing NestJS would leave it working, it belongs here.
 
-### CacheService
+## Folder Map
 
-`CacheService` wraps Nest CacheManager.
+| Folder         | What it owns                                                                |
+| -------------- | --------------------------------------------------------------------------- |
+| `constants/`   | `APP_CONSTANTS`, `CACHE_KEYS`, `QUEUE_NAMES`, `JOB_NAMES`, `Errors`, `Responses`, `HTTP_STATUS`, `MIME_TYPES`, metadata keys |
+| `context/`     | `RequestContext` — AsyncLocalStorage scope opened by the request middleware |
+| `dto/`         | `PaginationDto` (page / limit / sortBy / sortOrder / search)                |
+| `types/`       | `common.types`, `request.interface`, `jwt-payload.interface`, `pagination.interface` |
+| `responses/`   | `ApiResponse` builder + envelope types (`SuccessResponseBody`, `ErrorResponseBody`, `PaginationMeta`, etc.) |
+| `utils/`       | `date`, `encryption`, `pagination`, `sanitize` — stateless functions        |
+| `services/`    | `EncryptionService` — Nest-injectable wrapper over `encryption.util`         |
+| `helpers/`     | Reserved for future domain-neutral helper functions                          |
+| `shared.module.ts` | `@Global()` module that provides `EncryptionService`                    |
 
-Flow:
+## Why Both `services/` AND `utils/`?
 
-1. Services call `get`, `set`, `del`, `getOrSet`, or `invalidateByPattern`.
-2. Cache errors are logged and swallowed.
-3. On failures, callers fall back to their normal DB path.
+- `utils/` holds pure functions you can call from anywhere (tests, scripts, batch jobs).
+- `services/` wraps utilities into Nest-injectable classes when DI is preferable
+  (e.g. `EncryptionService` reads `IMAGE_ENCRYPTION_KEY` from `ConfigService`
+  and delegates to `encryption.util` for the actual crypto).
 
-Current user-profile caching is implemented in `UserService`.
+If you only need the function, import from `utils/`. If you need DI for the
+secret/key, inject the service.
 
-### EncryptionService
+## The Response Envelope
 
-`EncryptionService` wraps pure AES utilities.
+Every HTTP response — success or error — follows the shape:
 
-Flow:
+```jsonc
+{
+  "success": true,
+  "statusCode": 200,
+  "message": "...",
+  "data": { ... },
+  "meta": { ... },          // pagination only
+  "request": { ... },       // requestId, method, path, apiVersion
+  "timing":  { ... },       // totalMs, dbMs, cacheMs, externalMs (+ counts)
+  "server":  { ... },       // hostname, pid, env, region, appVersion
+  "tags":    { ... },       // free-form, set via RequestContext.tag()
+  "timestamp": "...",
+  "path": "..."
+}
+```
 
-1. The service reads `IMAGE_ENCRYPTION_KEY` from config.
-2. Buffer and string encryption methods delegate to `shared/utils/encryption.util.ts`.
-3. Upload flows use `encryptBuffer()` for sensitive processed files.
+`ApiResponse.attachDiagnostics()` stamps `request` / `timing` / `server` /
+`tags` from the active `RequestContext` just before send. Without a request
+context (tests, batch jobs) the envelope is still valid but thinner.
 
-## Utilities
+## Adding Code Here
 
-- `date.util.ts`: date helpers.
-- `encryption.util.ts`: pure crypto functions and secure token generation.
-- `pagination.util.ts`: pagination helpers.
-- `sanitize.util.ts`: sanitization helpers.
-- `index.ts`: utility exports.
+Add to `shared/` only when:
 
-## Dependencies
+- It is feature-agnostic (genuinely reusable across ≥ 2 modules), AND
+- It is framework-agnostic (no NestJS / Prisma / Redis dependency).
 
-- `CacheModule` is configured in `shared.module.ts`.
-- `ConfigService` supplies cache TTL and encryption key.
-- `CacheService` depends on `CACHE_MANAGER`.
-- `EncryptionService` depends on config and Node crypto utilities.
+If your helper imports `@nestjs/...`, it probably belongs in `core/` or in
+the feature module's `infrastructure/` folder.
 
 ## Complexity And Risk
 
-- Low to medium complexity.
-- Highest-risk area: encryption key handling. Changing keys makes existing encrypted files unreadable unless migration/decryption strategy exists.
-- Cache must remain optional. Do not make business correctness depend on a cache write succeeding.
-- `invalidateByPattern()` depends on a cache store with `keys()` support; memory stores may not support it.
-
-## Adding Shared Code
-
-Add code here only when it is not feature-specific. If the logic belongs to one domain, keep it in that feature module.
-
+- Low complexity in isolation — each file is small and pure.
+- Changes are still high blast radius: every layer can import shared.
+- Be cautious about adding new constants; prefer extending an existing registry
+  (`Errors`, `Responses`) over creating a new top-level file.
+- Cache keys are encoded as functions (`CACHE_KEYS.USER(id)`); never hand-roll
+  raw cache key strings in feature code — namespace collisions are easy and
+  silent.
+- Encryption key (`IMAGE_ENCRYPTION_KEY`) rotation breaks existing ciphertext.
+  Plan a migration before rotating in production.

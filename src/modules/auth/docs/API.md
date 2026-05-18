@@ -15,7 +15,7 @@ This document outlines the endpoints available in the **Auth Module**. For globa
 
 Register a new user account. Returns access and refresh tokens immediately on success.
 
-**Endpoint:** `POST /auth/register`
+**Endpoint:** `POST /api/v1/auth/register`
 
 ### Headers
 | Header            | Required  | Description                                                                  |
@@ -94,7 +94,7 @@ Register a new user account. Returns access and refresh tokens immediately on su
 
 Authenticate with email and password to receive tokens.
 
-**Endpoint:** `POST /auth/login`
+**Endpoint:** `POST /api/v1/auth/login`
 
 ### Request Body
 ```json
@@ -140,7 +140,7 @@ Authenticate with email and password to receive tokens.
 
 Issue a new access + refresh token pair using a valid refresh token. The old refresh token is invalidated after rotation.
 
-**Endpoint:** `POST /auth/refresh`
+**Endpoint:** `POST /api/v1/auth/refresh`
 
 ### Request Body
 ```json
@@ -173,7 +173,7 @@ Issue a new access + refresh token pair using a valid refresh token. The old ref
 
 Invalidate the current session by nullifying the stored refresh token. All subsequent refresh attempts with the old token will fail. Existing access tokens remain valid until expiry; the client must discard them immediately.
 
-**Endpoint:** `POST /auth/logout`
+**Endpoint:** `POST /api/v1/auth/logout`
 
 ### Headers
 | Header | Required | Description |

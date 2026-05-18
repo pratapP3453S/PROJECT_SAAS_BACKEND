@@ -1,29 +1,27 @@
 import { Module } from '@nestjs/common';
-import { TerminusModule } from '@nestjs/terminus';
-import { HttpModule } from '@nestjs/axios';
-import { HealthController } from './health.controller';
+import { HealthV1Module } from './api/v1/health-v1.module';
 
 /**
- * HealthModule — application health check module.
+ * HealthModule — feature aggregator for application health checks.
  *
- * Responsibility: Wires @nestjs/terminus health indicators with the HealthController.
- * PrismaService is injected automatically from PrismaModule (@Global).
+ * Responsibility
+ *  Re-exports the versioned API submodules (currently just v1). Adding `v2`
+ *  later is purely additive: create `api/v2/health-v2.module.ts` and import
+ *  it here alongside `HealthV1Module`.
  *
- * Imports:
- *  TerminusModule : provides HealthCheckService, PrismaHealthIndicator,
- *                   MemoryHealthIndicator (and others if needed later).
- *  HttpModule     : provides HttpService for optional HTTP health checks
- *                   (e.g. checking a downstream API's /health endpoint).
+ * Why a thin wrapper?
+ *  AppModule should depend on the feature, not on specific versions. This
+ *  module is the single import point so version rollouts don't ripple up to
+ *  the root module.
  *
- * Routes exposed (no auth — @Public()):
- *  GET /health      : composite check (DB ping + heap/RSS memory limits)
- *  GET /health/ping : lightweight liveness check (always 200 if process runs)
+ * Layers
+ *  - api/v1/        controllers + module wiring
+ *  - (no domain/application/infrastructure here — health is pure HTTP +
+ *    indicators provided by @nestjs/terminus, with no business logic.)
  *
  * Used by: AppModule → imports: [..., HealthModule]
- * See also: HealthController → src/modules/health/health.controller.ts
  */
 @Module({
-  imports: [TerminusModule, HttpModule],
-  controllers: [HealthController],
+  imports: [HealthV1Module],
 })
 export class HealthModule {}

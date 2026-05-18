@@ -1,29 +1,30 @@
 import { Module } from '@nestjs/common';
-import { UserController } from './user.controller';
-import { UserRepository } from './user.repository';
-import { UserService } from './user.service';
+import { UserV1Module } from './api/v1/user-v1.module';
 
 /**
- * UserModule — feature module for user profile management.
+ * UserModule — feature aggregator for user profile management.
  *
- * Responsibility: Wires the user Controller → Service → Repository layer.
- * CacheService and PrismaService are injected automatically from their
- * respective @Global() modules (SharedModule and PrismaModule).
+ * Layer
+ *  This is the public surface AppModule imports. It composes the versioned
+ *  API submodules and re-exports them so the providers UserV1Module declares
+ *  (UserService + UserRepository) flow up to consuming modules without being
+ *  duplicated.
  *
- * Exports:
- *  UserService    : available to other modules that need user lookup (e.g. future
- *                   modules that associate records with a user).
- *  UserRepository : available for direct DB access in more complex feature modules.
+ * Important: providers are declared ONCE in UserV1Module. Listing them again
+ * here would create two NestJS instances and break shared state (cache TTLs,
+ * Prisma connections behave fine because they're @Global, but injecting them
+ * twice still confuses things). Re-exporting the submodule is the canonical
+ * way to bubble its exports up.
  *
- * Used by: AppModule → imports: [..., UserModule]
- * See also:
- *  UserController → src/modules/user/user.controller.ts
- *  UserService    → src/modules/user/user.service.ts
- *  UserRepository → src/modules/user/user.repository.ts
+ * Layout under modules/user/
+ *  - domain/         entity types and pure rules
+ *  - infrastructure/ Prisma repository (concrete persistence)
+ *  - application/    UserService (use-cases) — depends on domain + infrastructure
+ *  - api/v1/         HTTP controller + request DTOs + UserV1Module
+ *  - user.module.ts  this file (composition root)
  */
 @Module({
-  controllers: [UserController],
-  providers: [UserService, UserRepository],
-  exports: [UserService, UserRepository],
+  imports: [UserV1Module],
+  exports: [UserV1Module],
 })
 export class UserModule {}
